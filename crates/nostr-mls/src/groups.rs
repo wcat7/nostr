@@ -21,6 +21,7 @@ use openmls::group::GroupId;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use tls_codec::Serialize as TlsSerialize;
+use openmls::extensions::{Extension, ExtensionType, UnknownExtension, RequiredCapabilitiesExtension};
 
 use super::extension::NostrGroupDataExtension;
 use super::NostrMls;
@@ -739,6 +740,167 @@ where
 
         Ok(NostrMlsCommitMessage {
             serialized: serialized_leave,
+        })
+    }
+
+    /// Updates the `NostrGroupDataExtension` for an existing MLS group.
+    ///
+    /// This method allows group administrators to update the public metadata of the
+    /// group (name, description, admin list and relay list). The update is
+    /// performed through the MLS `update_group_context_extensions` API and
+    /// therefore results in a new epoch and a commit that MUST be sent to the
+    /// rest of the group.
+    ///
+    /// On success, it returns a `NostrMlsCommitMessage` containing the serialized
+    /// commit message that should be broadcast to the group.
+    ///
+    /// # Arguments
+    /// * `group_id`        - The MLS group id of the group to be updated.
+    /// * `name`            - New group name. Pass `None` to keep the current one.
+    /// * `description`     - New group description. Pass `None` to keep the current one.
+    /// * `admin_pubkeys`   - Complete set of admin public keys. Pass `None` to keep the current set.
+    /// * `group_relays`    - Complete set of relay URLs. Pass `None` to keep the current set.
+    ///
+    /// # Errors
+    /// * `Error::GroupNotFound`            - If the MLS group is not found in storage.
+    /// * `Error::Group`                    - If the caller is not an admin or an MLS error occurs.
+    /// * Other errors bubbled up from storage / serialization routines.
+    pub fn update_group_data(
+        &self,
+        group_id: &GroupId,
+        name: Option<String>,
+        description: Option<String>,
+        admin_pubkeys: Option<Vec<PublicKey>>,
+        group_relays: Option<Vec<RelayUrl>>,
+    ) -> Result<NostrMlsCommitMessage, Error> {
+        // 1. Load the MLS group from storage.
+        let mut mls_group = self.load_mls_group(group_id)?.ok_or(Error::GroupNotFound)?;
+
+        // 2. Extract the current group data extension so we can modify it.
+        let mut group_data = NostrGroupDataExtension::from_group(&mls_group)?;
+
+        // 3. Ensure that the current user is an admin of the group.
+        let current_user_pk = self.get_current_user_pubkey(&mls_group)?;
+        if !group_data.admins.contains(&current_user_pk) {
+            return Err(Error::Group("Only group admins can update group data".to_string()));
+        }
+
+        // 4. Apply updates if provided.
+        if let Some(new_name) = name {
+            group_data.set_name(new_name);
+        }
+        if let Some(new_description) = description {
+            group_data.set_description(new_description);
+        }
+        if let Some(new_admins) = admin_pubkeys {
+            group_data.admins = new_admins.into_iter().collect();
+        }
+        if let Some(new_relays) = group_relays {
+            group_data.relays = new_relays.into_iter().collect();
+        }
+
+        // 5. Build a new `Extensions` object for the commit. We start with the
+        //    current extensions, replace the NostrGroupDataExtension entry, and
+        //    keep everything else unchanged so that we don't accidentally drop
+        //    required extensions like `RatchetTree`.
+
+        let serialized_group_data = group_data
+            .as_raw()
+            .tls_serialize_detached()
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        let mut updated_ext_list: Vec<Extension> = mls_group
+            .extensions()
+            .iter()
+            .filter(|ext| {
+                // Filter out the old NostrGroupDataExtension – we'll add the updated one below
+                !matches!(
+                    ext.extension_type(),
+                    ExtensionType::Unknown(id) if id == group_data.extension_type()
+                )
+            })
+            .cloned()
+            .collect();
+
+        // Insert the updated NostrGroupDataExtension as Unknown extension
+        updated_ext_list.push(Extension::Unknown(
+            group_data.extension_type(),
+            UnknownExtension(serialized_group_data),
+        ));
+
+        // Ensure we have a RequiredCapabilities extension that lists *all* extension types present.
+        let required_ext_types: Vec<ExtensionType> = updated_ext_list
+            .iter()
+            .map(|e| e.extension_type())
+            .collect();
+
+        // Replace existing RequiredCapabilities extension (if any) with an updated one
+        updated_ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
+
+        let req_cap_ext = RequiredCapabilitiesExtension::new(&required_ext_types, &[], &[]);
+        updated_ext_list.push(Extension::RequiredCapabilities(req_cap_ext));
+
+        let extensions = Extensions::from_vec(updated_ext_list.clone())
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        tracing::debug!(
+            target: "nostr_mls::groups::update_group_data",
+            "Preparing GroupContextExtensions update. Existing ext types: {:?}, Updated ext types: {:?}",
+            mls_group
+                .extensions()
+                .iter()
+                .map(|e| format!("{:?}", e.extension_type()))
+                .collect::<Vec<_>>(),
+            updated_ext_list
+                .iter()
+                .map(|e| format!("{:?}", e.extension_type()))
+                .collect::<Vec<_>>()
+        );
+
+        // 6. Load signer for committing.
+        let signer = self.load_mls_signer(&mls_group)?;
+
+        // 7. Build & stage commit with updated extensions.
+        let (commit_message, _welcome_option, _group_info) = mls_group
+            .update_group_context_extensions(&self.provider, extensions, &signer)
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        // 8. Merge the commit so that the local state is up to date.
+        mls_group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        // 9. Persist the updated group metadata in our storage layer.
+        if let Some(mut stored_group) = self.get_group(group_id)? {
+            stored_group.name = group_data.name.clone();
+            stored_group.description = group_data.description.clone();
+            stored_group.admin_pubkeys = group_data.admins.clone();
+            stored_group.epoch = mls_group.epoch().as_u64();
+
+            self.storage()
+                .save_group(stored_group.clone())
+                .map_err(|e| Error::Group(e.to_string()))?;
+
+            // (Re-)save relays so that any new ones are persisted.
+            for relay_url in group_data.relays.into_iter() {
+                let group_relay = group_types::GroupRelay {
+                    mls_group_id: stored_group.mls_group_id.clone(),
+                    relay_url,
+                };
+
+                self.storage()
+                    .save_group_relay(group_relay)
+                    .map_err(|e| Error::Group(e.to_string()))?;
+            }
+        }
+
+        // 10. Serialize the commit to bytes so that the caller can broadcast it.
+        let serialized_commit = commit_message
+            .tls_serialize_detached()
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        Ok(NostrMlsCommitMessage {
+            serialized: serialized_commit,
         })
     }
 }
