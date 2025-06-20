@@ -451,6 +451,16 @@ where
                     .map_err(|e| Error::Group(e.to_string()))?;
                 group.merge_pending_commit(&self.provider)?;
 
+                // Persist updated group data (e.g., rotated nostr_group_id, new epoch)
+                if let Some(mut stored) = self.get_group(group.group_id())? {
+                    // Try to extract latest NostrGroupDataExtension to grab rotated id
+                    if let Ok(ext) = crate::extension::NostrGroupDataExtension::from_group(&group) {
+                        stored.nostr_group_id = ext.nostr_group_id;
+                    }
+                    stored.epoch = group.epoch().as_u64();
+                    self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+                }
+
                 let member_changes = if !added_members.is_empty() || !removed_members.is_empty() {
                     Some(MemberChanges {
                         added_members,
