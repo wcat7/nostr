@@ -780,6 +780,8 @@ where
         group_id: &GroupId,
         proposal: QueuedProposal,
     ) -> Result<CommitProposalResult, Error> {
+        use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+
         // Load group
         let mut group = self.load_mls_group(group_id)?.ok_or(Error::GroupNotFound)?;
 
@@ -801,15 +803,72 @@ where
                 welcome_message: None,
             });
         }
-        // Commit pending proposals
-        let (commit_message, welcome_message, _) = group
-            .commit_to_pending_proposals(&self.provider, &signer)
-            .map_err(|e| Error::Group(e.to_string()))?;
 
-        let commit_message = commit_message
+        // 1. Build updated NostrGroupDataExtension with fresh group id
+        let mut group_data = NostrGroupDataExtension::from_group(&group)?;
+        let mut new_gid = [0u8; 32];
+        OsRng.fill_bytes(&mut new_gid);
+        group_data.set_nostr_group_id(new_gid);
+
+        // 2. Re-assemble Extensions list (replace old NostrGroupDataExtension & refresh RequiredCapabilities)
+        let serialized_group_data = group_data
+            .as_raw()
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
-        let welcome_message = match welcome_message {
+
+        let mut ext_list: Vec<Extension> = group
+            .extensions()
+            .iter()
+            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
+            .cloned()
+            .collect();
+
+        ext_list.push(Extension::Unknown(
+            group_data.extension_type(),
+            UnknownExtension(serialized_group_data),
+        ));
+
+        // Refresh RequiredCapabilities
+        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
+        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
+        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
+
+        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+
+        // 3. Build commit via builder: cover pending proposals + new GroupContextExtensions
+        let builder = group
+            .commit_builder()
+            .propose_group_context_extensions(extensions);
+
+        let builder = builder
+            .load_psks(self.provider.storage())
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        let (commit_out, welcome_opt, _group_info) = builder
+            .build(self.provider.rand(), self.provider.crypto(), &signer, |_| true)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .stage_commit(&self.provider)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .into_contents();
+
+        // 4. Merge commit so local state advances
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        // 5. Persist updated group metadata
+        if let Some(mut stored) = self.get_group(group_id)? {
+            stored.nostr_group_id = group_data.nostr_group_id;
+            stored.epoch = group.epoch().as_u64();
+            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+        }
+
+        // 6. Serialize outputs
+        let commit_bytes = commit_out
+            .tls_serialize_detached()
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        let welcome_bytes = match welcome_opt {
             Some(w) => Some(
                 w.tls_serialize_detached()
                     .map_err(|e| Error::Group(e.to_string()))?,
@@ -817,13 +876,9 @@ where
             None => None,
         };
 
-        group
-            .merge_pending_commit(&self.provider)
-            .map_err(|e| Error::Group(e.to_string()))?;
-
         Ok(CommitProposalResult {
-            commit_message: Some(commit_message),
-            welcome_message,
+            commit_message: Some(commit_bytes),
+            welcome_message: welcome_bytes,
         })
     }
 
