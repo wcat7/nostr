@@ -770,6 +770,7 @@ where
         group_id: &GroupId,
         name: Option<String>,
         description: Option<String>,
+        nostr_group_id: Option<[u8; 32]>,
         admin_pubkeys: Option<Vec<PublicKey>>,
         group_relays: Option<Vec<RelayUrl>>,
     ) -> Result<NostrMlsCommitMessage, Error> {
@@ -797,6 +798,9 @@ where
         }
         if let Some(new_relays) = group_relays {
             group_data.relays = new_relays.into_iter().collect();
+        }
+        if let Some(new_group_id) = nostr_group_id {
+            group_data.set_nostr_group_id(new_group_id);
         }
 
         // 5. Build a new `Extensions` object for the commit. We start with the
@@ -843,20 +847,6 @@ where
         let extensions = Extensions::from_vec(updated_ext_list.clone())
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        tracing::debug!(
-            target: "nostr_mls::groups::update_group_data",
-            "Preparing GroupContextExtensions update. Existing ext types: {:?}, Updated ext types: {:?}",
-            mls_group
-                .extensions()
-                .iter()
-                .map(|e| format!("{:?}", e.extension_type()))
-                .collect::<Vec<_>>(),
-            updated_ext_list
-                .iter()
-                .map(|e| format!("{:?}", e.extension_type()))
-                .collect::<Vec<_>>()
-        );
-
         // 6. Load signer for committing.
         let signer = self.load_mls_signer(&mls_group)?;
 
@@ -876,6 +866,9 @@ where
             stored_group.description = group_data.description.clone();
             stored_group.admin_pubkeys = group_data.admins.clone();
             stored_group.epoch = mls_group.epoch().as_u64();
+            if let Some(new_group_id) = nostr_group_id {
+                stored_group.nostr_group_id = new_group_id;
+            }
 
             self.storage()
                 .save_group(stored_group.clone())

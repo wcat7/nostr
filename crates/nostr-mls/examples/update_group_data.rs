@@ -13,6 +13,7 @@ use nostr_mls_memory_storage::NostrMlsMemoryStorage;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 use hex;
+use rand::RngCore;
 
 fn generate_identity() -> (Keys, NostrMls<NostrMlsMemoryStorage>) {
     let keys = Keys::generate();
@@ -74,10 +75,15 @@ async fn main() -> Result<()> {
     let new_description = "Now with an updated description".to_string();
     let new_relays = vec![RelayUrl::parse("ws://localhost:9090").unwrap()];
 
+    // Generate a new 32-byte nostr group id
+    let mut new_group_id = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut new_group_id);
+
     let commit_message = alice_nostr_mls.update_group_data(
         &group_id,
         Some(new_name.clone()),
         Some(new_description.clone()),
+        Some(new_group_id),
         None, // keep same admin list
         Some(new_relays.clone()),
     )?;
@@ -109,6 +115,7 @@ async fn main() -> Result<()> {
     assert_eq!(updated_ext.name, new_name);
     assert_eq!(updated_ext.description, new_description);
     assert!(updated_ext.relays.contains(&new_relays[0]));
+    assert_eq!(updated_ext.nostr_group_id, new_group_id);
 
     tracing::info!("Bob successfully processed commit & updated metadata");
 
