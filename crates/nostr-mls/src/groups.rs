@@ -581,24 +581,77 @@ where
         group_id: &GroupId,
         key_packages: &[KeyPackage],
     ) -> Result<AddMembersResult, Error> {
+        use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+
         // Load group
         let mut group = self.load_mls_group(group_id)?.ok_or(Error::GroupNotFound)?;
 
         let signer: SignatureKeyPair = self.load_mls_signer(&group)?;
 
-        let (commit_message, welcome_message, _group_info) = group
-            .add_members(&self.provider, &signer, key_packages)
+        // Build updated NostrGroupDataExtension with fresh group id
+        let mut group_data = NostrGroupDataExtension::from_group(&group)?;
+        let mut new_gid = [0u8; 32];
+        OsRng.fill_bytes(&mut new_gid);
+        group_data.set_nostr_group_id(new_gid);
+
+        let serialized_group_data = group_data
+            .as_raw()
+            .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
+
+        let mut ext_list: Vec<Extension> = group
+            .extensions()
+            .iter()
+            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
+            .cloned()
+            .collect();
+
+        ext_list.push(Extension::Unknown(
+            group_data.extension_type(),
+            UnknownExtension(serialized_group_data),
+        ));
+
+        // Update RequiredCapabilities
+        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
+        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
+        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
+
+        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+
+        // Build commit via builder (single commit with add proposals & context extensions)
+        let builder = group
+            .commit_builder()
+            .propose_adds(key_packages.to_vec())
+            .propose_group_context_extensions(extensions);
+
+        // Load any pending PSKs (rarely used but keeps parity with default helpers)
+        let builder = builder
+            .load_psks(self.provider.storage())
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        let (commit_out, welcome_opt, _group_info) = builder
+            .build(self.provider.rand(), self.provider.crypto(), &signer, |_| true)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .stage_commit(&self.provider)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .into_contents();
 
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        let serialized_commit = commit_message
+        // persist storage group changes
+        if let Some(mut stored) = self.get_group(group_id)? {
+            stored.nostr_group_id = group_data.nostr_group_id;
+            stored.epoch = group.epoch().as_u64();
+            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+        }
+
+        let serialized_commit = commit_out
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
-
-        let serialized_welcome = welcome_message
+        let serialized_welcome = welcome_opt
+            .ok_or(Error::Group("Missing welcome".into()))?
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
 
@@ -651,15 +704,68 @@ where
             ));
         }
 
-        let (commit_message, _welcome_option, _group_info) = group
-            .remove_members(&self.provider, &signer, &leaf_indices)
+        // Build updated NostrGroupDataExtension with fresh group id
+        let mut group_data = NostrGroupDataExtension::from_group(&group)?;
+        {
+            use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+            let mut new_gid = [0u8; 32];
+            OsRng.fill_bytes(&mut new_gid);
+            group_data.set_nostr_group_id(new_gid);
+        }
+
+        let serialized_group_data = group_data
+            .as_raw()
+            .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
+
+        let mut ext_list: Vec<Extension> = group
+            .extensions()
+            .iter()
+            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
+            .cloned()
+            .collect();
+
+        ext_list.push(Extension::Unknown(
+            group_data.extension_type(),
+            UnknownExtension(serialized_group_data),
+        ));
+
+        // Update RequiredCapabilities
+        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
+        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
+        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
+
+        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+
+        // Build commit via builder (single commit with removals & extensions)
+        let builder = group
+            .commit_builder()
+            .propose_removals(leaf_indices.clone())
+            .propose_group_context_extensions(extensions);
+
+        let builder = builder
+            .load_psks(self.provider.storage())
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        let (commit_out, _welcome_opt, _group_info) = builder
+            .build(self.provider.rand(), self.provider.crypto(), &signer, |_| true)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .stage_commit(&self.provider)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .into_contents();
 
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        let serialized_commit = commit_message
+        // persist storage update
+        if let Some(mut stored) = self.get_group(group_id)? {
+            stored.nostr_group_id = group_data.nostr_group_id;
+            stored.epoch = group.epoch().as_u64();
+            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+        }
+
+        let serialized_commit = commit_out
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
 
@@ -855,7 +961,7 @@ where
         let signer = self.load_mls_signer(&mls_group)?;
 
         // 7. Build & stage commit with updated extensions.
-        let (commit_message, _welcome_option, _group_info) = mls_group
+        let (commit_out, _welcome_opt, _group_info) = mls_group
             .update_group_context_extensions(&self.provider, extensions, &signer)
             .map_err(|e| Error::Group(e.to_string()))?;
 
@@ -890,7 +996,7 @@ where
         }
 
         // 10. Serialize the commit to bytes so that the caller can broadcast it.
-        let serialized_commit = commit_message
+        let serialized_commit = commit_out
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
 
