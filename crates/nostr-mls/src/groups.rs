@@ -283,6 +283,51 @@ where
         Ok(relays.into_iter().map(|r| r.relay_url).collect())
     }
 
+    /// Generate a fresh random 32-byte Nostr group-id, rebuild the Extensions list
+    /// (replacing the existing `NostrGroupDataExtension` and refreshing
+    /// `RequiredCapabilitiesExtension`) and return `(Extensions, new_gid,
+    /// updated_group_data)`.
+    fn rotate_group_id_extensions(
+        &self,
+        group: &openmls::group::MlsGroup,
+    ) -> Result<(Extensions, [u8; 32], NostrGroupDataExtension), Error> {
+        use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+
+        // Clone current group data and inject a new random id
+        let mut group_data = NostrGroupDataExtension::from_group(group)?;
+        let mut new_gid = [0u8; 32];
+        OsRng.fill_bytes(&mut new_gid);
+        group_data.set_nostr_group_id(new_gid);
+
+        // Serialize back to raw bytes for Unknown extension
+        let serialized_group_data = group_data
+            .as_raw()
+            .tls_serialize_detached()
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        // Build new Extensions vec: keep everything except old NGDE, then add updated one
+        let mut ext_list: Vec<Extension> = group
+            .extensions()
+            .iter()
+            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
+            .cloned()
+            .collect();
+
+        ext_list.push(Extension::Unknown(
+            group_data.extension_type(),
+            UnknownExtension(serialized_group_data),
+        ));
+
+        // Refresh RequiredCapabilities to include complete set
+        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
+        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
+        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
+
+        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+
+        Ok((extensions, new_gid, group_data))
+    }
+
     /// Creates a new MLS group with the specified members and settings.
     ///
     /// This function creates a new MLS group with the given name, description, members, and administrators.
@@ -581,42 +626,13 @@ where
         group_id: &GroupId,
         key_packages: &[KeyPackage],
     ) -> Result<AddMembersResult, Error> {
-        use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
-
         // Load group
         let mut group = self.load_mls_group(group_id)?.ok_or(Error::GroupNotFound)?;
 
         let signer: SignatureKeyPair = self.load_mls_signer(&group)?;
 
-        // Build updated NostrGroupDataExtension with fresh group id
-        let mut group_data = NostrGroupDataExtension::from_group(&group)?;
-        let mut new_gid = [0u8; 32];
-        OsRng.fill_bytes(&mut new_gid);
-        group_data.set_nostr_group_id(new_gid);
-
-        let serialized_group_data = group_data
-            .as_raw()
-            .tls_serialize_detached()
-            .map_err(|e| Error::Group(e.to_string()))?;
-
-        let mut ext_list: Vec<Extension> = group
-            .extensions()
-            .iter()
-            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
-            .cloned()
-            .collect();
-
-        ext_list.push(Extension::Unknown(
-            group_data.extension_type(),
-            UnknownExtension(serialized_group_data),
-        ));
-
-        // Update RequiredCapabilities
-        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
-        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
-        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
-
-        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+        // Build Extensions with rotated group id
+        let (extensions, _new_gid, group_data) = self.rotate_group_id_extensions(&group)?;
 
         // Build commit via builder (single commit with add proposals & context extensions)
         let builder = group
@@ -704,38 +720,8 @@ where
             ));
         }
 
-        // Build updated NostrGroupDataExtension with fresh group id
-        let mut group_data = NostrGroupDataExtension::from_group(&group)?;
-        {
-            use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
-            let mut new_gid = [0u8; 32];
-            OsRng.fill_bytes(&mut new_gid);
-            group_data.set_nostr_group_id(new_gid);
-        }
-
-        let serialized_group_data = group_data
-            .as_raw()
-            .tls_serialize_detached()
-            .map_err(|e| Error::Group(e.to_string()))?;
-
-        let mut ext_list: Vec<Extension> = group
-            .extensions()
-            .iter()
-            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
-            .cloned()
-            .collect();
-
-        ext_list.push(Extension::Unknown(
-            group_data.extension_type(),
-            UnknownExtension(serialized_group_data),
-        ));
-
-        // Update RequiredCapabilities
-        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
-        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
-        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
-
-        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+        // Build Extensions with rotated group id
+        let (extensions, _new_gid, group_data) = self.rotate_group_id_extensions(&group)?;
 
         // Build commit via builder (single commit with removals & extensions)
         let builder = group
@@ -780,8 +766,6 @@ where
         group_id: &GroupId,
         proposal: QueuedProposal,
     ) -> Result<CommitProposalResult, Error> {
-        use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
-
         // Load group
         let mut group = self.load_mls_group(group_id)?.ok_or(Error::GroupNotFound)?;
 
@@ -804,38 +788,10 @@ where
             });
         }
 
-        // 1. Build updated NostrGroupDataExtension with fresh group id
-        let mut group_data = NostrGroupDataExtension::from_group(&group)?;
-        let mut new_gid = [0u8; 32];
-        OsRng.fill_bytes(&mut new_gid);
-        group_data.set_nostr_group_id(new_gid);
+        // Build Extensions with rotated group id
+        let (extensions, _new_gid, group_data) = self.rotate_group_id_extensions(&group)?;
 
-        // 2. Re-assemble Extensions list (replace old NostrGroupDataExtension & refresh RequiredCapabilities)
-        let serialized_group_data = group_data
-            .as_raw()
-            .tls_serialize_detached()
-            .map_err(|e| Error::Group(e.to_string()))?;
-
-        let mut ext_list: Vec<Extension> = group
-            .extensions()
-            .iter()
-            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
-            .cloned()
-            .collect();
-
-        ext_list.push(Extension::Unknown(
-            group_data.extension_type(),
-            UnknownExtension(serialized_group_data),
-        ));
-
-        // Refresh RequiredCapabilities
-        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
-        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
-        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
-
-        let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
-
-        // 3. Build commit via builder: cover pending proposals + new GroupContextExtensions
+        // Build commit via builder: cover pending proposals + new GroupContextExtensions
         let builder = group
             .commit_builder()
             .propose_group_context_extensions(extensions);
@@ -851,19 +807,19 @@ where
             .map_err(|e| Error::Group(e.to_string()))?
             .into_contents();
 
-        // 4. Merge commit so local state advances
+        // Merge commit so local state advances
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        // 5. Persist updated group metadata
+        // Persist updated group metadata
         if let Some(mut stored) = self.get_group(group_id)? {
             stored.nostr_group_id = group_data.nostr_group_id;
             stored.epoch = group.epoch().as_u64();
             self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
         }
 
-        // 6. Serialize outputs
+        // Serialize outputs
         let commit_bytes = commit_out
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
