@@ -770,7 +770,6 @@ where
         group_id: &GroupId,
         name: Option<String>,
         description: Option<String>,
-        nostr_group_id: Option<[u8; 32]>,
         admin_pubkeys: Option<Vec<PublicKey>>,
         group_relays: Option<Vec<RelayUrl>>,
     ) -> Result<NostrMlsCommitMessage, Error> {
@@ -799,7 +798,12 @@ where
         if let Some(new_relays) = group_relays {
             group_data.relays = new_relays.into_iter().collect();
         }
-        if let Some(new_group_id) = nostr_group_id {
+
+        // Always rotate the Nostr Group ID to a fresh random value for each metadata update
+        {
+            use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+            let mut new_group_id = [0u8; 32];
+            OsRng.fill_bytes(&mut new_group_id);
             group_data.set_nostr_group_id(new_group_id);
         }
 
@@ -866,9 +870,7 @@ where
             stored_group.description = group_data.description.clone();
             stored_group.admin_pubkeys = group_data.admins.clone();
             stored_group.epoch = mls_group.epoch().as_u64();
-            if let Some(new_group_id) = nostr_group_id {
-                stored_group.nostr_group_id = new_group_id;
-            }
+            stored_group.nostr_group_id = group_data.nostr_group_id;
 
             self.storage()
                 .save_group(stored_group.clone())

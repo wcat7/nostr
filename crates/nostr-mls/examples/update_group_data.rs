@@ -13,7 +13,6 @@ use nostr_mls_memory_storage::NostrMlsMemoryStorage;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 use hex;
-use rand::RngCore;
 
 fn generate_identity() -> (Keys, NostrMls<NostrMlsMemoryStorage>) {
     let keys = Keys::generate();
@@ -75,15 +74,10 @@ async fn main() -> Result<()> {
     let new_description = "Now with an updated description".to_string();
     let new_relays = vec![RelayUrl::parse("ws://localhost:9090").unwrap()];
 
-    // Generate a new 32-byte nostr group id
-    let mut new_group_id = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut new_group_id);
-
     let commit_message = alice_nostr_mls.update_group_data(
         &group_id,
         Some(new_name.clone()),
         Some(new_description.clone()),
-        Some(new_group_id),
         None, // keep same admin list
         Some(new_relays.clone()),
     )?;
@@ -115,9 +109,27 @@ async fn main() -> Result<()> {
     assert_eq!(updated_ext.name, new_name);
     assert_eq!(updated_ext.description, new_description);
     assert!(updated_ext.relays.contains(&new_relays[0]));
-    assert_eq!(updated_ext.nostr_group_id, new_group_id);
+    assert_ne!(updated_ext.nostr_group_id, create_res.group.nostr_group_id);
 
     tracing::info!("Bob successfully processed commit & updated metadata");
+
+    // =============== Second metadata update to test group ID rotation again ===============
+    let second_description = "Another description change".to_string();
+    let commit2 = alice_nostr_mls.update_group_data(
+        &group_id,
+        None,
+        Some(second_description.clone()),
+        None,
+        None,
+    )?;
+
+    // Apply on Bob side
+    bob_nostr_mls.process_message_for_group(&mut bob_group, commit2.as_bytes())?;
+
+    let updated_ext2 = NostrGroupDataExtension::from_group(&bob_group)?;
+    assert_eq!(updated_ext2.description, second_description);
+    assert_ne!(updated_ext2.nostr_group_id, updated_ext.nostr_group_id);
+    tracing::info!("Group ID rotated again successfully");
 
     // In a real application, Alice would now wrap `commit_message.serialized`
     // into an appropriate Nostr event (kind 448) and send it to the other
