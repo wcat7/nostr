@@ -222,7 +222,7 @@ where
     /// * `Err(Error)` - If message creation or encryption fails
     pub fn create_commit_proposal_message(
         &self,
-        nostr_group_id: &[u8; 32],
+        nostr_group_id: String,
         commit_proposal_message: &[u8],
         secret_key: &[u8; 32],
     ) -> Result<Event, Error> {
@@ -240,7 +240,7 @@ where
         // Generate ephemeral key
         let ephemeral_nostr_keys: Keys = Keys::generate();
 
-        let tag: Tag = Tag::custom(TagKind::h(), [hex::encode(nostr_group_id)]);
+        let tag: Tag = Tag::custom(TagKind::h(), [nostr_group_id]);
         let event = EventBuilder::new(Kind::MlsGroupMessage, encrypted_content)
             .tag(tag)
             .sign_with_keys(&ephemeral_nostr_keys)?;
