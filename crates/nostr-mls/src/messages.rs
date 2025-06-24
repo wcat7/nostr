@@ -222,16 +222,10 @@ where
     /// * `Err(Error)` - If message creation or encryption fails
     pub fn create_commit_proposal_message(
         &self,
-        mls_group_id: &GroupId,
+        nostr_group_id: &[u8; 32],
         commit_proposal_message: &[u8],
         secret_key: &[u8; 32],
     ) -> Result<Event, Error> {
-        // Load stored group
-        let group: group_types::Group = self
-            .get_group(mls_group_id)
-            .map_err(|e| Error::Group(e.to_string()))?
-            .ok_or(Error::GroupNotFound)?;
-
         // Convert that secret to nostr keys
         let secret_key: SecretKey = SecretKey::from_slice(secret_key)?;
         let export_nostr_keys: Keys = Keys::new(secret_key);
@@ -246,7 +240,7 @@ where
         // Generate ephemeral key
         let ephemeral_nostr_keys: Keys = Keys::generate();
 
-        let tag: Tag = Tag::custom(TagKind::h(), [hex::encode(group.nostr_group_id)]);
+        let tag: Tag = Tag::custom(TagKind::h(), [hex::encode(nostr_group_id)]);
         let event = EventBuilder::new(Kind::MlsGroupMessage, encrypted_content)
             .tag(tag)
             .sign_with_keys(&ephemeral_nostr_keys)?;
