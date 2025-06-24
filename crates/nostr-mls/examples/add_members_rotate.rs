@@ -101,6 +101,42 @@ async fn main() -> Result<()> {
     assert_eq!(alice_mls.get_members(&mls_gid)?.len(), 3);
     assert_eq!(bob_mls.get_members(&mls_gid)?.len(), 3);
 
+    // Verify extension consistency after rotation
+    let alice_group_after = alice_mls.load_mls_group(&mls_gid)?.unwrap();
+    let bob_group_after = bob_mls.load_mls_group(&mls_gid)?.unwrap();
+    
+    // Both groups should have the same set of extension types
+    let alice_ext_types: std::collections::BTreeSet<_> = alice_group_after
+        .extensions()
+        .iter()
+        .map(|e| e.extension_type())
+        .collect();
+    let bob_ext_types: std::collections::BTreeSet<_> = bob_group_after
+        .extensions()
+        .iter()
+        .map(|e| e.extension_type())
+        .collect();
+    
+    assert_eq!(alice_ext_types, bob_ext_types, "Extension types should be consistent across all group members");
+    
+    // Verify all required extensions are present (excluding auto-managed ones)
+    for required_ext in &[
+        ExtensionType::RequiredCapabilities,
+        ExtensionType::LastResort,
+        ExtensionType::Unknown(0xF2EE), // NOSTR_GROUP_DATA_EXTENSION_TYPE
+    ] {
+        assert!(alice_ext_types.contains(required_ext), "Missing required extension: {:?}", required_ext);
+    }
+    
+    // RatchetTree is managed by OpenMLS and may not always be present in extensions()
+    // but we can log if it's there
+    if alice_ext_types.contains(&ExtensionType::RatchetTree) {
+        tracing::info!("✅ RatchetTree extension is present");
+    } else {
+        tracing::info!("ℹ️ RatchetTree extension is managed by OpenMLS internally");
+    }
+
     tracing::info!("✅ add_members single-commit rotation example passed");
+    tracing::info!("✅ Extension consistency verified after group ID rotation");
     Ok(())
 } 

@@ -21,7 +21,7 @@ use openmls::group::GroupId;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use tls_codec::Serialize as TlsSerialize;
-use openmls::extensions::{Extension, ExtensionType, UnknownExtension, RequiredCapabilitiesExtension};
+use openmls::extensions::{Extension, ExtensionType, UnknownExtension, RequiredCapabilitiesExtension, LastResortExtension};
 
 use super::extension::NostrGroupDataExtension;
 use super::NostrMls;
@@ -90,6 +90,45 @@ impl<Storage> NostrMls<Storage>
 where
     Storage: NostrMlsStorageProvider,
 {
+    /// Ensures all required extensions are present in the extension list
+    /// This helper function maintains consistency across all extension handling
+    fn ensure_required_extensions(&self, ext_list: &mut Vec<Extension>) {
+        let current_ext_types: std::collections::HashSet<ExtensionType> = ext_list
+            .iter()
+            .map(|e| e.extension_type())
+            .collect();
+
+        for &required_ext_type in &crate::constant::REQUIRED_EXTENSIONS {
+            if !current_ext_types.contains(&required_ext_type) {
+                match required_ext_type {
+                    ExtensionType::RequiredCapabilities => {
+                        // Will be added separately after all other extensions
+                        continue;
+                    }
+                    ExtensionType::LastResort => {
+                        // Add LastResort extension if missing
+                        ext_list.push(Extension::LastResort(LastResortExtension {}));
+                    }
+                    ExtensionType::RatchetTree => {
+                        // RatchetTree is managed by OpenMLS automatically and may not appear
+                        // in the extensions() list even when it's being used internally
+                        tracing::debug!("RatchetTree extension not found in extensions list - this is normal as it's managed internally by OpenMLS");
+                    }
+                    ExtensionType::Unknown(ext_type_id) => {
+                        if ext_type_id == crate::constant::NOSTR_GROUP_DATA_EXTENSION_TYPE {
+                            // NostrGroupDataExtension should be handled separately
+                            continue;
+                        }
+                        tracing::warn!("Unknown required extension type: {}", ext_type_id);
+                    }
+                    _ => {
+                        tracing::warn!("Unhandled required extension type: {:?}", required_ext_type);
+                    }
+                }
+            }
+        }
+    }
+
     /// Retrieves the leaf node for the current member in an MLS group
     ///
     /// # Arguments
@@ -305,23 +344,43 @@ where
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        // Build new Extensions vec: keep everything except old NGDE, then add updated one
-        let mut ext_list: Vec<Extension> = group
-            .extensions()
-            .iter()
-            .filter(|ext| !matches!(ext.extension_type(), ExtensionType::Unknown(id) if id == group_data.extension_type()))
-            .cloned()
-            .collect();
+        // Start with all REQUIRED_EXTENSIONS to ensure consistency
+        let mut ext_list: Vec<Extension> = Vec::new();
+        
+        // Add all existing extensions except the old NostrGroupDataExtension
+        for ext in group.extensions().iter() {
+            match ext.extension_type() {
+                ExtensionType::Unknown(id) if id == group_data.extension_type() => {
+                    // Skip old NostrGroupDataExtension, we'll add the updated one below
+                    continue;
+                }
+                ExtensionType::RequiredCapabilities => {
+                    // Skip RequiredCapabilities, we'll regenerate it at the end
+                    continue;
+                }
+                _ => {
+                    ext_list.push(ext.clone());
+                }
+            }
+        }
 
+        // Add the updated NostrGroupDataExtension
         ext_list.push(Extension::Unknown(
             group_data.extension_type(),
             UnknownExtension(serialized_group_data),
         ));
 
-        // Refresh RequiredCapabilities to include complete set
-        ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
-        let req_ext_types: Vec<ExtensionType> = ext_list.iter().map(|e| e.extension_type()).collect();
-        ext_list.push(Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&req_ext_types, &[], &[])));
+        // Ensure all REQUIRED_EXTENSIONS are present
+        self.ensure_required_extensions(&mut ext_list);
+
+        // Generate RequiredCapabilities with ALL extension types (including required ones)
+        let all_ext_types: Vec<ExtensionType> = ext_list
+            .iter()
+            .map(|e| e.extension_type())
+            .collect();
+        
+        let req_cap_ext = RequiredCapabilitiesExtension::new(&all_ext_types, &[], &[]);
+        ext_list.push(Extension::RequiredCapabilities(req_cap_ext));
 
         let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
 
@@ -938,11 +997,12 @@ where
             .extensions()
             .iter()
             .filter(|ext| {
-                // Filter out the old NostrGroupDataExtension – we'll add the updated one below
-                !matches!(
-                    ext.extension_type(),
-                    ExtensionType::Unknown(id) if id == group_data.extension_type()
-                )
+                // Filter out the old NostrGroupDataExtension and RequiredCapabilities
+                match ext.extension_type() {
+                    ExtensionType::Unknown(id) if id == group_data.extension_type() => false,
+                    ExtensionType::RequiredCapabilities => false,
+                    _ => true,
+                }
             })
             .cloned()
             .collect();
@@ -953,14 +1013,14 @@ where
             UnknownExtension(serialized_group_data),
         ));
 
-        // Ensure we have a RequiredCapabilities extension that lists *all* extension types present.
+        // Ensure all REQUIRED_EXTENSIONS are present
+        self.ensure_required_extensions(&mut updated_ext_list);
+
+        // Generate RequiredCapabilities with ALL extension types (including required ones)
         let required_ext_types: Vec<ExtensionType> = updated_ext_list
             .iter()
             .map(|e| e.extension_type())
             .collect();
-
-        // Replace existing RequiredCapabilities extension (if any) with an updated one
-        updated_ext_list.retain(|e| !matches!(e, Extension::RequiredCapabilities(_)));
 
         let req_cap_ext = RequiredCapabilitiesExtension::new(&required_ext_types, &[], &[]);
         updated_ext_list.push(Extension::RequiredCapabilities(req_cap_ext));
