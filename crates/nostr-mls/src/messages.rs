@@ -338,8 +338,14 @@ where
                                     if let Ok(identity_str) = std::str::from_utf8(identity_bytes) {
                                         tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Self-removing member with identity: {}", identity_str);
                                         removed_members.push(identity_str.to_string());
+                                    } else {
+                                        tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to convert identity bytes to UTF-8 string");
                                     }
+                                } else {
+                                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to convert member credential to BasicCredential for self-remove");
                                 }
+                            } else {
+                                tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to get self-removing member at index {:?}", removed_index);
                             }
 
                             let member_changes = if !removed_members.is_empty() {
@@ -401,6 +407,7 @@ where
                             tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Removing member at leaf index: {:?}", removed_index);
 
                             // Get information about the removed member through leaf index from group
+                            // IMPORTANT: We need to get this information BEFORE the group state is updated
                             if let Some(member) = group.member_at(removed_index) {
                                 if let Ok(credential) =
                                     BasicCredential::try_from(member.credential.clone())
@@ -410,7 +417,11 @@ where
                                         tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Removing member with identity: {}", identity_str);
                                         removed_members.push(identity_str.to_string());
                                     }
+                                } else {
+                                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to convert member credential to BasicCredential");
                                 }
+                            } else {
+                                tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to get member at index {:?}", removed_index);
                             }
                         }
                         Proposal::Update(_) => {
@@ -440,10 +451,48 @@ where
                     }
                 }
 
-                group
-                    .merge_staged_commit(&self.provider, *staged_commit)
-                    .map_err(|e| Error::Group(e.to_string()))?;
-                group.merge_pending_commit(&self.provider)?;
+                // Prepare member changes before attempting to merge
+                let member_changes = if !added_members.is_empty() || !removed_members.is_empty() {
+                    Some(MemberChanges {
+                        added_members,
+                        removed_members,
+                    })
+                } else {
+                    None
+                };
+
+                // Try to merge the staged commit
+                if let Err(merge_error) = group.merge_staged_commit(&self.provider, *staged_commit) {
+                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to merge staged commit: {:?}", merge_error);
+                    // If merge fails but we have member changes, return them anyway
+                    // This handles the case where a member is processing their own removal
+                    if member_changes.is_some() {
+                        return Ok(ProcessMessageResult {
+                            message: None,
+                            member_changes,
+                            commit: None,
+                            welcome: None,
+                        });
+                    } else {
+                        return Err(Error::Group(merge_error.to_string()));
+                    }
+                }
+
+                // Try to merge pending commit
+                if let Err(pending_error) = group.merge_pending_commit(&self.provider) {
+                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to merge pending commit: {:?}", pending_error);
+                    // If merge fails but we have member changes, return them anyway
+                    if member_changes.is_some() {
+                        return Ok(ProcessMessageResult {
+                            message: None,
+                            member_changes,
+                            commit: None,
+                            welcome: None,
+                        });
+                    } else {
+                        return Err(Error::MergePendingCommit(pending_error.to_string()));
+                    }
+                }
 
                 // Persist updated group data (e.g., rotated nostr_group_id, new epoch)
                 if let Some(mut stored) = self.get_group(group.group_id())? {
@@ -454,15 +503,6 @@ where
                     stored.epoch = group.epoch().as_u64();
                     self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
                 }
-
-                let member_changes = if !added_members.is_empty() || !removed_members.is_empty() {
-                    Some(MemberChanges {
-                        added_members,
-                        removed_members,
-                    })
-                } else {
-                    None
-                };
 
                 Ok(ProcessMessageResult {
                     message: None,
