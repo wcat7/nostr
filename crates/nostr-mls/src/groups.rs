@@ -370,10 +370,7 @@ where
             UnknownExtension(serialized_group_data),
         ));
 
-        // Ensure all REQUIRED_EXTENSIONS are present
-        self.ensure_required_extensions(&mut ext_list);
-
-        // Generate RequiredCapabilities with ALL extension types (including required ones)
+        // Generate RequiredCapabilities with ALL extension types present
         let all_ext_types: Vec<ExtensionType> = ext_list
             .iter()
             .map(|e| e.extension_type())
@@ -383,6 +380,8 @@ where
         ext_list.push(Extension::RequiredCapabilities(req_cap_ext));
 
         let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
+
+        tracing::debug!("Rotated extensions: {:?}", extensions.iter().map(|e| e.extension_type()).collect::<Vec<_>>());
 
         Ok((extensions, new_gid, group_data))
     }
@@ -690,32 +689,27 @@ where
 
         let signer: SignatureKeyPair = self.load_mls_signer(&group)?;
 
-        // Build Extensions with rotated group id
+        // First rotate the group ID, then add members - this ensures welcome message has the rotated ID
         let (extensions, _new_gid, group_data) = self.rotate_group_id_extensions(&group)?;
-
-        // Build commit via builder (single commit with add proposals & context extensions)
-        let builder = group
-            .commit_builder()
-            .propose_adds(key_packages.to_vec())
-            .propose_group_context_extensions(extensions);
-
-        // Load any pending PSKs (rarely used but keeps parity with default helpers)
-        let builder = builder
-            .load_psks(self.provider.storage())
+        
+        let (_extension_commit, _welcome_ext, _group_info_ext) = group
+            .update_group_context_extensions(&self.provider, extensions, &signer)
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        let (commit_out, welcome_opt, _group_info) = builder
-            .build(self.provider.rand(), self.provider.crypto(), &signer, |_| true)
-            .map_err(|e| Error::Group(e.to_string()))?
-            .stage_commit(&self.provider)
-            .map_err(|e| Error::Group(e.to_string()))?
-            .into_contents();
+        // Merge the extension update commit
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        // Now add members with the rotated group ID already in place
+        let (commit_out, welcome_opt, _group_info) = group
+            .add_members(&self.provider, &signer, key_packages)?;
 
         group
             .merge_pending_commit(&self.provider)
             .map_err(|e| Error::Group(e.to_string()))?;
 
-        // persist storage group changes
+        // persist storage group changes with rotated group ID
         if let Some(mut stored) = self.get_group(group_id)? {
             stored.nostr_group_id = group_data.nostr_group_id;
             stored.epoch = group.epoch().as_u64();
@@ -726,7 +720,6 @@ where
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
         let serialized_welcome = welcome_opt
-            .ok_or(Error::Group("Missing welcome".into()))?
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
 
