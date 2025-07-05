@@ -17,11 +17,13 @@ use std::str;
 use nostr::{PublicKey, RelayUrl};
 use nostr_mls_storage::groups::types as group_types;
 use nostr_mls_storage::NostrMlsStorageProvider;
+use openmls::extensions::{
+    Extension, ExtensionType, LastResortExtension, RequiredCapabilitiesExtension, UnknownExtension,
+};
 use openmls::group::GroupId;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use tls_codec::Serialize as TlsSerialize;
-use openmls::extensions::{Extension, ExtensionType, UnknownExtension, RequiredCapabilitiesExtension, LastResortExtension};
 
 use super::extension::NostrGroupDataExtension;
 use super::NostrMls;
@@ -93,10 +95,8 @@ where
     /// Ensures all required extensions are present in the extension list
     /// This helper function maintains consistency across all extension handling
     fn ensure_required_extensions(&self, ext_list: &mut Vec<Extension>) {
-        let current_ext_types: std::collections::HashSet<ExtensionType> = ext_list
-            .iter()
-            .map(|e| e.extension_type())
-            .collect();
+        let current_ext_types: std::collections::HashSet<ExtensionType> =
+            ext_list.iter().map(|e| e.extension_type()).collect();
 
         for &required_ext_type in &crate::constant::REQUIRED_EXTENSIONS {
             if !current_ext_types.contains(&required_ext_type) {
@@ -122,7 +122,10 @@ where
                         tracing::warn!("Unknown required extension type: {}", ext_type_id);
                     }
                     _ => {
-                        tracing::warn!("Unhandled required extension type: {:?}", required_ext_type);
+                        tracing::warn!(
+                            "Unhandled required extension type: {:?}",
+                            required_ext_type
+                        );
                     }
                 }
             }
@@ -346,7 +349,7 @@ where
 
         // Start with all REQUIRED_EXTENSIONS to ensure consistency
         let mut ext_list: Vec<Extension> = Vec::new();
-        
+
         // Add all existing extensions except the old NostrGroupDataExtension
         for ext in group.extensions().iter() {
             match ext.extension_type() {
@@ -371,17 +374,21 @@ where
         ));
 
         // Generate RequiredCapabilities with ALL extension types present
-        let all_ext_types: Vec<ExtensionType> = ext_list
-            .iter()
-            .map(|e| e.extension_type())
-            .collect();
-        
+        let all_ext_types: Vec<ExtensionType> =
+            ext_list.iter().map(|e| e.extension_type()).collect();
+
         let req_cap_ext = RequiredCapabilitiesExtension::new(&all_ext_types, &[], &[]);
         ext_list.push(Extension::RequiredCapabilities(req_cap_ext));
 
         let extensions = Extensions::from_vec(ext_list).map_err(|e| Error::Group(e.to_string()))?;
 
-        tracing::debug!("Rotated extensions: {:?}", extensions.iter().map(|e| e.extension_type()).collect::<Vec<_>>());
+        tracing::debug!(
+            "Rotated extensions: {:?}",
+            extensions
+                .iter()
+                .map(|e| e.extension_type())
+                .collect::<Vec<_>>()
+        );
 
         Ok((extensions, new_gid, group_data))
     }
@@ -689,21 +696,27 @@ where
 
         let signer: SignatureKeyPair = self.load_mls_signer(&group)?;
 
-        // First rotate the group ID, then add members - this ensures welcome message has the rotated ID
+        // Build Extensions with rotated group id
         let (extensions, _new_gid, group_data) = self.rotate_group_id_extensions(&group)?;
-        
-        let (_extension_commit, _welcome_ext, _group_info_ext) = group
-            .update_group_context_extensions(&self.provider, extensions, &signer)
-            .map_err(|e| Error::Group(e.to_string()))?;
 
-        // Merge the extension update commit
-        group
-            .merge_pending_commit(&self.provider)
-            .map_err(|e| Error::Group(e.to_string()))?;
+        let bundle = group
+            .commit_builder()
+            .propose_adds(key_packages.iter().cloned())
+            .propose_group_context_extensions(extensions)
+            .force_self_update(true)
+            .load_psks(self.provider.storage())?
+            .build(
+                self.provider.rand(),
+                self.provider.crypto(),
+                &signer,
+                |_| true,
+            )?
+            .stage_commit(&self.provider)?;
 
-        // Now add members with the rotated group ID already in place
-        let (commit_out, welcome_opt, _group_info) = group
-            .add_members(&self.provider, &signer, key_packages)?;
+        let welcome: MlsMessageOut = bundle.to_welcome_msg().ok_or(Error::Group(
+            "No secrets to generate commit message.".to_string(),
+        ))?;
+        let (commit, _welcome_opt, _group_info) = bundle.into_contents();
 
         group
             .merge_pending_commit(&self.provider)
@@ -713,13 +726,15 @@ where
         if let Some(mut stored) = self.get_group(group_id)? {
             stored.nostr_group_id = group_data.nostr_group_id;
             stored.epoch = group.epoch().as_u64();
-            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+            self.storage()
+                .save_group(stored)
+                .map_err(|e| Error::Group(e.to_string()))?;
         }
 
-        let serialized_commit = commit_out
+        let serialized_commit = commit
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
-        let serialized_welcome = welcome_opt
+        let serialized_welcome = welcome
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
 
@@ -786,7 +801,12 @@ where
             .map_err(|e| Error::Group(e.to_string()))?;
 
         let (commit_out, _welcome_opt, _group_info) = builder
-            .build(self.provider.rand(), self.provider.crypto(), &signer, |_| true)
+            .build(
+                self.provider.rand(),
+                self.provider.crypto(),
+                &signer,
+                |_| true,
+            )
             .map_err(|e| Error::Group(e.to_string()))?
             .stage_commit(&self.provider)
             .map_err(|e| Error::Group(e.to_string()))?
@@ -800,7 +820,9 @@ where
         if let Some(mut stored) = self.get_group(group_id)? {
             stored.nostr_group_id = group_data.nostr_group_id;
             stored.epoch = group.epoch().as_u64();
-            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+            self.storage()
+                .save_group(stored)
+                .map_err(|e| Error::Group(e.to_string()))?;
         }
 
         let serialized_commit = commit_out
@@ -853,7 +875,12 @@ where
             .map_err(|e| Error::Group(e.to_string()))?;
 
         let (commit_out, welcome_opt, _group_info) = builder
-            .build(self.provider.rand(), self.provider.crypto(), &signer, |_| true)
+            .build(
+                self.provider.rand(),
+                self.provider.crypto(),
+                &signer,
+                |_| true,
+            )
             .map_err(|e| Error::Group(e.to_string()))?
             .stage_commit(&self.provider)
             .map_err(|e| Error::Group(e.to_string()))?
@@ -868,7 +895,9 @@ where
         if let Some(mut stored) = self.get_group(group_id)? {
             stored.nostr_group_id = group_data.nostr_group_id;
             stored.epoch = group.epoch().as_u64();
-            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+            self.storage()
+                .save_group(stored)
+                .map_err(|e| Error::Group(e.to_string()))?;
         }
 
         // Serialize outputs
@@ -951,7 +980,9 @@ where
         // 3. Ensure that the current user is an admin of the group.
         let current_user_pk = self.get_current_user_pubkey(&mls_group)?;
         if !group_data.admins.contains(&current_user_pk) {
-            return Err(Error::Group("Only group admins can update group data".to_string()));
+            return Err(Error::Group(
+                "Only group admins can update group data".to_string(),
+            ));
         }
 
         // 4. Apply updates if provided.

@@ -16,7 +16,7 @@ use openmls::error::LibraryError;
 use openmls::extensions::errors::InvalidExtensionError;
 use openmls::framing::errors::ProtocolMessageError;
 use openmls::group::{
-    AddMembersError, CreateMessageError, ExportSecretError, MergePendingCommitError, NewGroupError,
+    AddMembersError, CommitBuilderStageError, CreateCommitError, CreateMessageError, ExportSecretError, MergePendingCommitError, NewGroupError,
     ProcessMessageError, SelfUpdateError, WelcomeError,
 };
 use openmls::key_packages::errors::{KeyPackageNewError, KeyPackageVerifyError};
@@ -323,5 +323,20 @@ where
 {
     fn from(e: WelcomeError<T>) -> Self {
         Self::Welcome(e.to_string())
+    }
+}
+
+impl From<CreateCommitError> for Error {
+    fn from(e: CreateCommitError) -> Self {
+        Self::Group(e.to_string())
+    }
+}
+
+impl<T> From<CommitBuilderStageError<T>> for Error
+where
+    T: fmt::Display,
+{
+    fn from(e: CommitBuilderStageError<T>) -> Self {
+        Self::Group(e.to_string())
     }
 }
