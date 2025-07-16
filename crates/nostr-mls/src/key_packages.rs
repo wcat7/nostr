@@ -21,6 +21,12 @@ where
     /// This function generates a hex-encoded key package that is used as the content field of a kind:443 Nostr event.
     /// The key package contains the user's credential and capabilities required for MLS operations.
     ///
+    /// # Arguments
+    ///
+    /// * `public_key` - The user's nostr public key
+    /// * `relays` - An iterator of relay URLs where the key package should be published
+    /// * `client` - The client name to include in the event tags
+    ///
     /// # Returns
     ///
     /// A tuple containing:
@@ -37,7 +43,8 @@ where
         &self,
         public_key: &PublicKey,
         relays: I,
-    ) -> Result<(String, [Tag; 4]), Error>
+        client: &str,
+    ) -> Result<(String, [Tag; 5]), Error>
     where
         I: IntoIterator<Item = RelayUrl>,
     {
@@ -65,6 +72,7 @@ where
             ),
             Tag::custom(TagKind::MlsExtensions, [self.extensions_value()]),
             Tag::relays(relays),
+            Tag::custom(TagKind::Client, [client]),
         ];
 
         Ok((hex::encode(key_package_serialized), tags))
@@ -218,7 +226,7 @@ mod tests {
 
         // Create key package
         let (key_package_hex, tags) = nostr_mls
-            .create_key_package_for_event(&test_pubkey, relays.clone())
+            .create_key_package_for_event(&test_pubkey, relays.clone(), "test-client")
             .expect("Failed to create key package");
 
         // Create new instance for parsing
@@ -232,11 +240,12 @@ mod tests {
         // Verify the key package has the expected properties
         assert_eq!(key_package.ciphersuite(), DEFAULT_CIPHERSUITE);
 
-        assert_eq!(tags.len(), 4);
+        assert_eq!(tags.len(), 5);
         assert_eq!(tags[0].kind(), TagKind::MlsProtocolVersion);
         assert_eq!(tags[1].kind(), TagKind::MlsCiphersuite);
         assert_eq!(tags[2].kind(), TagKind::MlsExtensions);
         assert_eq!(tags[3].kind(), TagKind::Relays);
+        assert_eq!(tags[4].kind(), TagKind::Client);
 
         assert_eq!(
             tags[3].content().unwrap(),
@@ -259,7 +268,7 @@ mod tests {
 
         // Create and parse key package
         let (key_package_hex, _) = nostr_mls
-            .create_key_package_for_event(&test_pubkey, relays.clone())
+            .create_key_package_for_event(&test_pubkey, relays.clone(), "test-client")
             .expect("Failed to create key package");
 
         // Create new instance for parsing and deletion
@@ -309,7 +318,7 @@ mod tests {
 
         // Create and parse key package
         let (key_package_hex, _) = nostr_mls
-            .create_key_package_for_event(&test_pubkey, relays.clone())
+            .create_key_package_for_event(&test_pubkey, relays.clone(), "test-client")
             .expect("Failed to create key package");
 
         let key_package = nostr_mls
