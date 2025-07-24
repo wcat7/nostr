@@ -35,3 +35,7 @@ path = "examples/mls_memory.rs"
 [[example]]
 name = "mls_sqlite"
 path = "examples/mls_sqlite.rs"
+
+[[example]]
+name = "extract_my_keypackage_info"
+path = "examples/extract_my_keypackage_info.rs"

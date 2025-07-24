@@ -21,6 +21,19 @@ pub struct WelcomePreview {
     pub nostr_group_data: NostrGroupDataExtension,
 }
 
+/// Information about a keypackage extracted from a welcome message
+#[derive(Debug, Clone)]
+pub struct KeyPackageInfo {
+    /// Leaf index in the ratchet tree
+    pub leaf_index: u32,
+    /// Credential identity (usually the Nostr public key)
+    pub identity: String,
+    /// Signature key (hex encoded)
+    pub signature_key: String,
+    /// Encryption key (hex encoded)
+    pub encryption_key: String,
+}
+
 /// Joined group result
 #[derive(Debug)]
 pub struct JoinedGroupResult {
@@ -51,6 +64,116 @@ where
             .pending_welcomes()
             .map_err(|e| Error::Welcome(e.to_string()))?;
         Ok(welcomes)
+    }
+
+    /// Extracts keypackage information from a welcome message
+    ///
+    /// This method parses a welcome message and extracts information about the keypackages
+    /// that were used to add members to the group. This is useful for analyzing welcome
+    /// messages without actually joining the group.
+    ///
+    /// # Arguments
+    ///
+    /// * `wrapper_event_id` - The wrapper event ID (kind:1059 event)
+    /// * `welcome_event` - The welcome event (kind:444 event)
+    ///
+    /// # Returns
+    ///
+    /// A vector of keypackage information extracted from the welcome message
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The welcome message cannot be parsed
+    /// - The welcome message is invalid
+    /// - The ratchet tree cannot be accessed
+    pub fn extract_keypackage_info_from_welcome(
+        &self,
+        wrapper_event_id: &EventId,
+        welcome_event: &UnsignedEvent,
+    ) -> Result<Vec<KeyPackageInfo>, Error> {
+        let welcome_preview = self.preview_welcome(wrapper_event_id, welcome_event)?;
+        let mut keypackage_info = Vec::new();
+        
+        // Get member information from the staged welcome
+        for (leaf_index, member) in welcome_preview.staged_welcome.members().enumerate() {
+            // Extract credential identity
+            let identity = match BasicCredential::try_from(member.credential.clone()) {
+                Ok(basic_cred) => {
+                    String::from_utf8(basic_cred.identity().to_vec())
+                        .map_err(|e| Error::Utf8(e.utf8_error()))?
+                }
+                Err(_) => {
+                    tracing::warn!("Non-basic credential found in member, skipping");
+                    continue;
+                }
+            };
+            
+            // Extract signature key
+            let signature_key = hex::encode(member.signature_key.as_slice());
+            
+            // Extract encryption key
+            let encryption_key = hex::encode(member.encryption_key.as_slice());
+            
+            keypackage_info.push(KeyPackageInfo {
+                leaf_index: leaf_index as u32,
+                identity,
+                signature_key,
+                encryption_key,
+            });
+        }
+        
+        Ok(keypackage_info)
+    }
+
+
+
+    /// Finds an encoded keypackage from a welcome event
+    ///
+    /// This method checks if any of your encoded keypackages is included in a welcome message
+    /// and returns information about the first one found along with its index.
+    ///
+    /// # Arguments
+    ///
+    /// * `encoded_keypackages` - Your encoded keypackages (hex strings) to look for
+    /// * `wrapper_event_id` - The wrapper event ID (kind:1059 event)
+    /// * `welcome_event` - The welcome event (kind:444 event)
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - `Option<usize>`: The index of the matching keypackage in the input array, if found
+    /// - `Option<KeyPackageInfo>`: Information about your keypackage if found in the welcome message
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The welcome message cannot be parsed
+    /// - The welcome message is invalid
+    /// - Any encoded keypackage cannot be parsed
+    pub fn find_encoded_keypackage_from_welcome_event(
+        &self,
+        encoded_keypackages: &[String],
+        wrapper_event_id: &EventId,
+        welcome_event: &UnsignedEvent,
+    ) -> Result<(Option<usize>, Option<KeyPackageInfo>), Error> {
+        let keypackage_info_list = self.extract_keypackage_info_from_welcome(wrapper_event_id, welcome_event)?;
+        
+        // Check each of your encoded keypackages
+        for (index, encoded_keypackage) in encoded_keypackages.iter().enumerate() {
+            // Parse the encoded keypackage
+            let keypackage = self.parse_serialized_key_package(encoded_keypackage)?;
+            let keypackage_signature_key = hex::encode(keypackage.leaf_node().signature_key().as_slice());
+            
+            // Look for a match
+            for info in &keypackage_info_list {
+                if info.signature_key == keypackage_signature_key {
+                    return Ok((Some(index), Some(info.clone())));
+                }
+            }
+        }
+        
+        Ok((None, None))
     }
 
     /// Processes a welcome and stores it in the database
