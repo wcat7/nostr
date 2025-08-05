@@ -266,6 +266,62 @@ impl GroupStorage for NostrMlsSqliteStorage {
 
         Ok(())
     }
+
+    fn delete_group(&self, group_id: &GroupId) -> Result<(), GroupError> {
+        let conn_guard = self.db_connection.lock().map_err(into_group_err)?;
+
+        // Check if the group exists first using the same connection
+        let mut stmt = conn_guard
+            .prepare("SELECT COUNT(*) FROM groups WHERE mls_group_id = ?")
+            .map_err(into_group_err)?;
+
+        let count: i64 = stmt
+            .query_row([group_id.as_slice()], |row| row.get(0))
+            .map_err(into_group_err)?;
+
+        if count == 0 {
+            return Err(GroupError::InvalidParameters(format!(
+                "Group with MLS ID {:?} not found",
+                group_id
+            )));
+        }
+
+        // Delete related data first (foreign key constraints)
+        
+        // Delete group exporter secrets
+        conn_guard
+            .execute(
+                "DELETE FROM group_exporter_secrets WHERE mls_group_id = ?",
+                params![group_id.as_slice()],
+            )
+            .map_err(into_group_err)?;
+
+        // Delete group relays
+        conn_guard
+            .execute(
+                "DELETE FROM group_relays WHERE mls_group_id = ?",
+                params![group_id.as_slice()],
+            )
+            .map_err(into_group_err)?;
+
+        // Delete messages
+        conn_guard
+            .execute(
+                "DELETE FROM messages WHERE mls_group_id = ?",
+                params![group_id.as_slice()],
+            )
+            .map_err(into_group_err)?;
+
+        // Finally delete the group itself
+        conn_guard
+            .execute(
+                "DELETE FROM groups WHERE mls_group_id = ?",
+                params![group_id.as_slice()],
+            )
+            .map_err(into_group_err)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -446,5 +502,55 @@ mod tests {
 
         assert_eq!(retrieved_secret1.secret, [0u8; 32]);
         assert_eq!(retrieved_secret2.secret, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_delete_group() {
+        let storage = NostrMlsSqliteStorage::new_in_memory().unwrap();
+
+        // Create a test group
+        let mls_group_id = GroupId::from_slice(&[1, 2, 3, 4]);
+        let mut nostr_group_id = [0u8; 32];
+        nostr_group_id[0..13].copy_from_slice(b"test_group_12");
+
+        let group = Group {
+            mls_group_id: mls_group_id.clone(),
+            nostr_group_id,
+            name: "Test Group".to_string(),
+            description: "A test group".to_string(),
+            admin_pubkeys: BTreeSet::new(),
+            last_message_id: None,
+            last_message_at: None,
+            group_type: GroupType::Group,
+            epoch: 0,
+            state: GroupState::Active,
+        };
+
+        // Save the group
+        storage.save_group(group).unwrap();
+
+        // Verify the group exists
+        let found_group = storage
+            .find_group_by_mls_group_id(&mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_group.name, "Test Group");
+
+        // Delete the group
+        let result = storage.delete_group(&mls_group_id);
+        assert!(result.is_ok());
+
+        // Verify the group is deleted
+        let found_group = storage.find_group_by_mls_group_id(&mls_group_id).unwrap();
+        assert!(found_group.is_none());
+
+        // Verify all groups list is empty
+        let all_groups = storage.all_groups().unwrap();
+        assert_eq!(all_groups.len(), 0);
+
+        // Try to delete a non-existent group
+        let non_existent_group_id = GroupId::from_slice(&[9, 9, 9, 9]);
+        let result = storage.delete_group(&non_existent_group_id);
+        assert!(result.is_err());
     }
 }

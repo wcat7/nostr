@@ -60,4 +60,7 @@ pub trait GroupStorage {
         &self,
         group_exporter_secret: GroupExporterSecret,
     ) -> Result<(), GroupError>;
+
+    /// Delete a group by MLS group ID
+    fn delete_group(&self, group_id: &GroupId) -> Result<(), GroupError>;
 }

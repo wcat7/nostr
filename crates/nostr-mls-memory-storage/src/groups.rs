@@ -137,4 +137,51 @@ impl GroupStorage for NostrMlsMemoryStorage {
 
         Ok(())
     }
+
+    fn delete_group(&self, group_id: &GroupId) -> Result<(), GroupError> {
+        // Check if the group exists first
+        let group = self.find_group_by_mls_group_id(group_id)?;
+        if group.is_none() {
+            return Err(GroupError::InvalidState(InvalidGroupState::NoAdmins));
+        }
+
+        // Remove from MLS group ID cache
+        {
+            let mut cache = self.groups_cache.write();
+            cache.pop(group_id);
+        }
+
+        // Remove from Nostr group ID cache
+        if let Some(group) = group {
+            let mut cache = self.groups_by_nostr_id_cache.write();
+            cache.pop(&group.nostr_group_id);
+        }
+
+        // Remove related data
+        {
+            let mut messages_cache = self.messages_by_group_cache.write();
+            messages_cache.pop(group_id);
+        }
+
+        {
+            let mut relays_cache = self.group_relays_cache.write();
+            relays_cache.pop(group_id);
+        }
+
+        {
+            let mut secrets_cache = self.group_exporter_secrets_cache.write();
+            // Remove all secrets for this group
+            let keys_to_remove: Vec<_> = secrets_cache
+                .iter()
+                .filter(|((gid, _), _)| gid == group_id)
+                .map(|((gid, epoch), _)| (gid.clone(), *epoch))
+                .collect();
+            
+            for key in keys_to_remove {
+                secrets_cache.pop(&key);
+            }
+        }
+
+        Ok(())
+    }
 }

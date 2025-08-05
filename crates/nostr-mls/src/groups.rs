@@ -915,6 +915,10 @@ where
     /// Leave the group
     ///
     /// Returns a NostrMlsCommitMessage containing the serialized leave message.
+    /// Leave the group
+    ///
+    /// Returns a NostrMlsCommitMessage containing the serialized leave message.
+    /// The group will be deleted from storage when leaving.
     pub fn leave_group(&self, group_id: &GroupId) -> Result<NostrMlsCommitMessage, Error> {
         // Load group
         let mut group = self.load_mls_group(group_id)?.ok_or(Error::GroupNotFound)?;
@@ -928,6 +932,17 @@ where
         let serialized_leave = leave_message
             .tls_serialize_detached()
             .map_err(|e| Error::Group(e.to_string()))?;
+
+        // Delete the group from storage when leaving
+        tracing::info!(target: "nostr_mls::groups::leave_group", "User leaving group, deleting group from storage");
+        
+        // Delete the MLS group from storage (this cleans up all MLS-related data)
+        group.delete(self.provider.storage())
+            .map_err(|e| Error::Group(e.to_string()))?;
+        self.storage().delete_group(group_id).map_err(|e| Error::Group(e.to_string()))?;
+        
+        // TODO: Also delete the NostrMls group metadata from storage
+        // This would require implementing delete_group in the storage layer
 
         Ok(NostrMlsCommitMessage {
             serialized: serialized_leave,
