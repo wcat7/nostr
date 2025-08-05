@@ -669,13 +669,6 @@ where
             return Err(Error::Group("Creator must be an admin".to_string()));
         }
 
-        // Creator must not be included as a member
-        if member_pubkeys.contains(creator_pubkey) {
-            return Err(Error::Group(
-                "Creator must not be included as a member".to_string(),
-            ));
-        }
-
         // Check that admins are valid pubkeys and are members
         for pubkey in admin_pubkeys.iter() {
             if !member_pubkeys.contains(pubkey) && creator_pubkey != pubkey {
