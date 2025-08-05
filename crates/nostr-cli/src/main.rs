@@ -5,6 +5,7 @@
 use std::fmt::Write;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -116,6 +117,9 @@ async fn run() -> Result<()> {
         Command::Serve { port } => {
             let mut builder = RelayBuilder::default();
 
+            // Bind to all interfaces (0.0.0.0) instead of just localhost
+            builder = builder.addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
             if let Some(port) = port {
                 builder = builder.port(port);
             }
@@ -123,6 +127,7 @@ async fn run() -> Result<()> {
             let relay = LocalRelay::run(builder).await?;
 
             println!("Relay running at {}", relay.url());
+            println!("Available at: ws://0.0.0.0:{}/", relay.url().split(':').last().unwrap_or("8080"));
 
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await

@@ -651,14 +651,98 @@ impl InnerLocalRelay {
                 // Send JSON messages
                 send_json_msgs(ws_tx, json_msgs).await
             }
-            ClientMessage::ReqMultiFilter { subscription_id, .. } => {
-                send_msg(
-                    ws_tx,
-                    RelayMessage::Closed {
-                        subscription_id,
-                        message: Cow::Owned(format!("{}: multi-filter REQs aren't supported (https://github.com/nostr-protocol/nips/pull/1645)", MachineReadablePrefix::Unsupported)),
-                    },
-                ).await
+            ClientMessage::ReqMultiFilter { subscription_id, filters } => {
+                // Check number of subscriptions
+                if session.subscriptions.len() >= self.rate_limit.max_reqs
+                    && !session.subscriptions.contains_key(&subscription_id)
+                {
+                    return send_msg(
+                            ws_tx,
+                            RelayMessage::Closed {
+                                subscription_id,
+                                message: Cow::Owned(format!(
+                                    "{}: too many REQs",
+                                    MachineReadablePrefix::RateLimited
+                                )),
+                            },
+                        )
+                        .await;
+                }
+
+                // Check NIP42
+                if let Some(nip42) = &self.nip42 {
+                    if nip42.mode.is_read() && !session.nip42.is_authenticated() {
+                        // Generate and send AUTH challenge
+                        send_msg(
+                            ws_tx,
+                            RelayMessage::Auth {
+                                challenge: Cow::Owned(session.nip42.generate_challenge()),
+                            },
+                        )
+                        .await?;
+
+                        // Return error
+                        return send_msg(
+                                ws_tx,
+                                RelayMessage::Closed {
+                                    subscription_id,
+                                    message: Cow::Owned(format!(
+                                        "{}: you must auth",
+                                        MachineReadablePrefix::AuthRequired
+                                    )),
+                                },
+                            )
+                            .await;
+                    }
+                }
+
+                let mut json_msgs: Vec<String> = Vec::new();
+
+                // Process each filter
+                for filter in &filters {
+                    let filter: Filter = filter.to_owned();
+
+                    // Check query policy plugins
+                    let mut should_reject = false;
+                    for plugin in self.query_policy.iter() {
+                        if let PolicyResult::Reject(msg) = plugin.admit_query(&filter, addr).await {
+                            should_reject = true;
+                            break;
+                        }
+                    }
+
+                    if should_reject {
+                        continue;
+                    }
+
+                    // Query database
+                    let events: Events = self.database.query(filter.clone()).await?;
+                    let events_len: usize = events.len();
+
+                    tracing::debug!(
+                        "Found {events_len} events for subscription '{subscription_id}' with multi-filter",
+                    );
+
+                    // Add events
+                    json_msgs.extend(
+                        events
+                            .into_iter()
+                            .map(|event| RelayMessage::Event {subscription_id: Cow::Borrowed(subscription_id.as_ref()), event: Cow::Owned(event)}.as_json()),
+                    );
+                }
+
+                // Add EOSE message
+                json_msgs.push(RelayMessage::EndOfStoredEvents(Cow::Borrowed(subscription_id.as_ref())).as_json());
+
+                // Save the subscription with the first filter (or create a combined filter)
+                if let Some(first_filter) = filters.first() {
+                    session
+                        .subscriptions
+                        .insert(subscription_id.clone().into_owned(), first_filter.clone().to_owned());
+                }
+
+                // Send JSON messages
+                send_json_msgs(ws_tx, json_msgs).await
             }
             ClientMessage::Count {
                 subscription_id,
