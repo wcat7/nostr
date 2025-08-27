@@ -582,11 +582,14 @@ where
             }
         }
 
-        // Persist updated group data (e.g., rotated nostr_group_id, new epoch)
+        // Persist updated group data (e.g., rotated nostr_group_id, new epoch, name, description)
         if let Some(mut stored) = self.get_group(mls_group.group_id())? {
-            // Try to extract latest NostrGroupDataExtension to grab rotated id
+            // Try to extract latest NostrGroupDataExtension to grab rotated id and metadata
             if let Ok(ext) = crate::extension::NostrGroupDataExtension::from_group(&mls_group) {
                 stored.nostr_group_id = ext.nostr_group_id;
+                stored.name = ext.name;
+                stored.description = ext.description;
+                // Note: admins and relays are not updated here as they require separate proposals
             }
             stored.epoch = mls_group.epoch().as_u64();
             self.storage()
