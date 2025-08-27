@@ -700,6 +700,7 @@ where
                     member_changes,
                     commit,
                     welcome,
+                    message_bytes: None,
                 })
             }
             Ok(ProcessMessageResult {
@@ -707,7 +708,7 @@ where
                 member_changes,
                 commit,
                 welcome,
-                message_bytes: _,
+                message_bytes: None,
             }) => {
                 // This is what happens with proposals, commits, etc.
                 Ok(ProcessedEventResult {
@@ -715,6 +716,7 @@ where
                     member_changes,
                     commit,
                     welcome,
+                    message_bytes: None,
                 })
             }
             Err(e) => {
@@ -726,6 +728,7 @@ where
                             member_changes: None,
                             commit: None,
                             welcome: None,
+                            message_bytes: None,
                         });
                     }
                     _ => {
@@ -737,6 +740,7 @@ where
                     member_changes: None,
                     commit: None,
                     welcome: None,
+                    message_bytes: None,
                 })
             }
         }
