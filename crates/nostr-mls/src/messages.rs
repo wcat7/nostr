@@ -42,6 +42,8 @@ pub struct ProcessMessageResult {
     pub commit: Option<Vec<u8>>,
     /// Welcome message bytes (for self-remove proposals that get committed)
     pub welcome: Option<Vec<u8>>,
+    /// Staged commit message that needs to be processed later
+    pub staged_commit: Option<StagedCommit>,
 }
 
 /// Result of processing a Nostr event containing an MLS message
@@ -311,6 +313,7 @@ where
                     member_changes: None,
                     commit: None,
                     welcome: None,
+                    staged_commit: None,
                 })
             }
             ProcessedMessageContent::ProposalMessage(staged_proposal) => {
@@ -362,6 +365,7 @@ where
                                 member_changes,
                                 commit: commit_result.commit_message,
                                 welcome: commit_result.welcome_message,
+                                staged_commit: None,
                             });
                         } else {
                             tracing::debug!(target: "nostr_mls::messages::process_message_for_group", "This is a remove proposal for another member");
@@ -374,141 +378,19 @@ where
                     member_changes: None,
                     commit: None,
                     welcome: None,
+                    staged_commit: None,
                 })
             }
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
                 // This is a commit message
                 tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Received commit message");
-
-                // Check proposals in the proposal queue to understand member changes
-                let queued_proposals = staged_commit.queued_proposals();
-                let mut added_members = Vec::new();
-                let mut removed_members = Vec::new();
-
-                for queued_proposal in queued_proposals {
-                    match queued_proposal.proposal() {
-                        Proposal::Add(add_proposal) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains Add proposal");
-                            // Get information about the added member from add_proposal.key_package()
-                            let key_package = add_proposal.key_package();
-                            if let Ok(credential) = BasicCredential::try_from(
-                                key_package.leaf_node().credential().clone(),
-                            ) {
-                                let identity_bytes = credential.identity();
-                                if let Ok(identity_str) = std::str::from_utf8(identity_bytes) {
-                                    tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Adding member with identity: {}", identity_str);
-                                    added_members.push(identity_str.to_string());
-                                }
-                            }
-                        }
-                        Proposal::Remove(remove_proposal) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains Remove proposal");
-                            let removed_index = remove_proposal.removed();
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Removing member at leaf index: {:?}", removed_index);
-
-                            // Get information about the removed member through leaf index from group
-                            // IMPORTANT: We need to get this information BEFORE the group state is updated
-                            if let Some(member) = group.member_at(removed_index) {
-                                if let Ok(credential) =
-                                    BasicCredential::try_from(member.credential.clone())
-                                {
-                                    let identity_bytes = credential.identity();
-                                    if let Ok(identity_str) = std::str::from_utf8(identity_bytes) {
-                                        tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Removing member with identity: {}", identity_str);
-                                        removed_members.push(identity_str.to_string());
-                                    }
-                                } else {
-                                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to convert member credential to BasicCredential");
-                                }
-                            } else {
-                                tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to get member at index {:?}", removed_index);
-                            }
-                        }
-                        Proposal::Update(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains Update proposal");
-                        }
-                        Proposal::PreSharedKey(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains PreSharedKey proposal");
-                        }
-                        Proposal::ReInit(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains ReInit proposal");
-                        }
-                        Proposal::ExternalInit(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains ExternalInit proposal");
-                        }
-                        Proposal::GroupContextExtensions(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains GroupContextExtensions proposal");
-                        }
-                        Proposal::AppAck(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains AppAck proposal");
-                        }
-                        Proposal::SelfRemove => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains SelfRemove proposal");
-                        }
-                        Proposal::Custom(_) => {
-                            tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Commit contains Custom proposal");
-                        }
-                    }
-                }
-
-                // Prepare member changes before attempting to merge
-                let member_changes = if !added_members.is_empty() || !removed_members.is_empty() {
-                    Some(MemberChanges {
-                        added_members,
-                        removed_members,
-                    })
-                } else {
-                    None
-                };
-
-                // Try to merge the staged commit
-                if let Err(merge_error) = group.merge_staged_commit(&self.provider, *staged_commit) {
-                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to merge staged commit: {:?}", merge_error);
-                    // If merge fails but we have member changes, return them anyway
-                    // This handles the case where a member is processing their own removal
-                    if member_changes.is_some() {
-                        return Ok(ProcessMessageResult {
-                            message: None,
-                            member_changes,
-                            commit: None,
-                            welcome: None,
-                        });
-                    } else {
-                        return Err(Error::Group(merge_error.to_string()));
-                    }
-                }
-
-                // Try to merge pending commit
-                if let Err(pending_error) = group.merge_pending_commit(&self.provider) {
-                    tracing::warn!(target: "nostr_mls::messages::process_message_for_group", "Failed to merge pending commit: {:?}", pending_error);
-                    // If merge fails but we have member changes, return them anyway
-                    if member_changes.is_some() {
-                        return Ok(ProcessMessageResult {
-                            message: None,
-                            member_changes,
-                            commit: None,
-                            welcome: None,
-                        });
-                    } else {
-                        return Err(Error::MergePendingCommit(pending_error.to_string()));
-                    }
-                }
-
-                // Persist updated group data (e.g., rotated nostr_group_id, new epoch)
-                if let Some(mut stored) = self.get_group(group.group_id())? {
-                    // Try to extract latest NostrGroupDataExtension to grab rotated id
-                    if let Ok(ext) = crate::extension::NostrGroupDataExtension::from_group(&group) {
-                        stored.nostr_group_id = ext.nostr_group_id;
-                    }
-                    stored.epoch = group.epoch().as_u64();
-                    self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
-                }
-
+                // Return staged commit for later processing instead of merging immediately
                 Ok(ProcessMessageResult {
                     message: None,
-                    member_changes,
+                    member_changes: None,
                     commit: None,
                     welcome: None,
+                    staged_commit: Some(*staged_commit),
                 })
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(external_join_proposal) => {
@@ -519,9 +401,195 @@ where
                     member_changes: None,
                     commit: None,
                     welcome: None,
+                    staged_commit: None,
                 })
             }
         }
+    }
+
+    /// Processes a commit message for a group
+    ///
+    /// This function handles commit message processing with the same logic as the staged commit
+    /// handling in process_message_for_group. It processes member changes and merges the commit.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The MLS group the commit message belongs to
+    /// * `message_bytes` - The serialized MLS message bytes to process
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ProcessMessageResult)` - Contains the processed message and member changes
+    /// * `Err(Error)` - If commit processing fails
+    pub fn process_commit_message_for_group(
+        &self,
+        group: &mut MlsGroup,
+        message_bytes: &[u8],
+    ) -> Result<ProcessMessageResult, Error> {
+        // This is a commit message
+        tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Processing commit message");
+
+        // Deserialize and process the message
+        let mls_message = MlsMessageIn::tls_deserialize_exact(message_bytes)?;
+        let protocol_message = mls_message.try_into_protocol_message()?;
+
+        // Return error if group ID doesn't match
+        if protocol_message.group_id() != group.group_id() {
+            return Err(Error::ProtocolGroupIdMismatch);
+        }
+
+        let processed_message = match group.process_message(&self.provider, protocol_message) {
+            Ok(processed_message) => processed_message,
+            Err(ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage)) => {
+                return Err(Error::CannotDecryptOwnMessage);
+            }
+            Err(e) => {
+                tracing::error!(target: "nostr_mls::messages::process_commit_message_for_group", "Error processing message: {:?}", e);
+                return Err(Error::Message(e.to_string()));
+            }
+        };
+
+        // Extract staged commit from processed message
+        let staged_commit = match processed_message.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged_commit) => staged_commit,
+            _ => {
+                return Err(Error::Message("Expected StagedCommitMessage but got different message type".to_string()));
+            }
+        };
+
+        // Check proposals in the proposal queue to understand member changes
+        let queued_proposals = staged_commit.queued_proposals();
+        let mut added_members = Vec::new();
+        let mut removed_members = Vec::new();
+
+        for queued_proposal in queued_proposals {
+            match queued_proposal.proposal() {
+                Proposal::Add(add_proposal) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains Add proposal");
+                    // Get information about the added member from add_proposal.key_package()
+                    let key_package = add_proposal.key_package();
+                    if let Ok(credential) = BasicCredential::try_from(
+                        key_package.leaf_node().credential().clone(),
+                    ) {
+                        let identity_bytes = credential.identity();
+                        if let Ok(identity_str) = std::str::from_utf8(identity_bytes) {
+                            tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Adding member with identity: {}", identity_str);
+                            added_members.push(identity_str.to_string());
+                        }
+                    }
+                }
+                Proposal::Remove(remove_proposal) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains Remove proposal");
+                    let removed_index = remove_proposal.removed();
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Removing member at leaf index: {:?}", removed_index);
+
+                    // Get information about the removed member through leaf index from group
+                    // IMPORTANT: We need to get this information BEFORE the group state is updated
+                    if let Some(member) = group.member_at(removed_index) {
+                        if let Ok(credential) =
+                            BasicCredential::try_from(member.credential.clone())
+                        {
+                            let identity_bytes = credential.identity();
+                            if let Ok(identity_str) = std::str::from_utf8(identity_bytes) {
+                                tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Removing member with identity: {}", identity_str);
+                                removed_members.push(identity_str.to_string());
+                            }
+                        } else {
+                            tracing::warn!(target: "nostr_mls::messages::process_commit_message_for_group", "Failed to convert member credential to BasicCredential");
+                        }
+                    } else {
+                        tracing::warn!(target: "nostr_mls::messages::process_commit_message_for_group", "Failed to get member at index {:?}", removed_index);
+                    }
+                }
+                Proposal::Update(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains Update proposal");
+                }
+                Proposal::PreSharedKey(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains PreSharedKey proposal");
+                }
+                Proposal::ReInit(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains ReInit proposal");
+                }
+                Proposal::ExternalInit(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains ExternalInit proposal");
+                }
+                Proposal::GroupContextExtensions(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains GroupContextExtensions proposal");
+                }
+                Proposal::AppAck(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains AppAck proposal");
+                }
+                Proposal::SelfRemove => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains SelfRemove proposal");
+                }
+                Proposal::Custom(_) => {
+                    tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Commit contains Custom proposal");
+                }
+            }
+        }
+
+        // Prepare member changes before attempting to merge
+        let member_changes = if !added_members.is_empty() || !removed_members.is_empty() {
+            Some(MemberChanges {
+                added_members,
+                removed_members,
+            })
+        } else {
+            None
+        };
+
+        // Try to merge the staged commit
+        if let Err(merge_error) = group.merge_staged_commit(&self.provider, *staged_commit) {
+            tracing::warn!(target: "nostr_mls::messages::process_commit_message_for_group", "Failed to merge staged commit: {:?}", merge_error);
+            // If merge fails but we have member changes, return them anyway
+            // This handles the case where a member is processing their own removal
+            if member_changes.is_some() {
+                return Ok(ProcessMessageResult {
+                    message: None,
+                    member_changes,
+                    commit: None,
+                    welcome: None,
+                    staged_commit: None,
+                });
+            } else {
+                return Err(Error::Group(merge_error.to_string()));
+            }
+        }
+
+        // Try to merge pending commit
+        if let Err(pending_error) = group.merge_pending_commit(&self.provider) {
+            tracing::warn!(target: "nostr_mls::messages::process_commit_message_for_group", "Failed to merge pending commit: {:?}", pending_error);
+            // If merge fails but we have member changes, return them anyway
+            if member_changes.is_some() {
+                return Ok(ProcessMessageResult {
+                    message: None,
+                    member_changes,
+                    commit: None,
+                    welcome: None,
+                    staged_commit: None,
+                });
+            } else {
+                return Err(Error::MergePendingCommit(pending_error.to_string()));
+            }
+        }
+
+        // Persist updated group data (e.g., rotated nostr_group_id, new epoch)
+        if let Some(mut stored) = self.get_group(group.group_id())? {
+            // Try to extract latest NostrGroupDataExtension to grab rotated id
+            if let Ok(ext) = crate::extension::NostrGroupDataExtension::from_group(&group) {
+                stored.nostr_group_id = ext.nostr_group_id;
+            }
+            stored.epoch = group.epoch().as_u64();
+            self.storage().save_group(stored).map_err(|e| Error::Group(e.to_string()))?;
+        }
+
+        Ok(ProcessMessageResult {
+            message: None,
+            member_changes,
+            commit: None,
+            welcome: None,
+            staged_commit: None,
+        })
     }
 
     /// Processes an incoming encrypted Nostr event containing an MLS message
@@ -598,6 +666,7 @@ where
                 member_changes,
                 commit,
                 welcome,
+                staged_commit: _,
             }) => {
                 let rumor_id: EventId = rumor.id();
 
@@ -627,6 +696,7 @@ where
                 member_changes,
                 commit,
                 welcome,
+                staged_commit: _,
             }) => {
                 // This is what happens with proposals, commits, etc.
                 Ok(ProcessedEventResult {
