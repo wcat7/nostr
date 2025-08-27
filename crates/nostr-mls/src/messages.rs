@@ -708,6 +708,23 @@ where
                 member_changes,
                 commit,
                 welcome,
+                message_bytes: Some(message_bytes_for_processing),
+            }) => {
+                // This is a commit message that needs to be processed later
+                // Return the message bytes for deferred processing
+                Ok(ProcessedEventResult {
+                    message: None,
+                    member_changes,
+                    commit,
+                    welcome,
+                    message_bytes: Some(message_bytes_for_processing),
+                })
+            }
+            Ok(ProcessMessageResult {
+                message: None,
+                member_changes,
+                commit,
+                welcome,
                 message_bytes: None,
             }) => {
                 // This is what happens with proposals, commits, etc.
