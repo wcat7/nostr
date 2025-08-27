@@ -57,6 +57,8 @@ pub struct ProcessedEventResult {
     pub commit: Option<Vec<u8>>,
     /// Welcome message bytes (for self-remove proposals that get committed)
     pub welcome: Option<Vec<u8>>,
+    /// Raw message bytes that need to be processed later
+    pub message_bytes: Option<Vec<u8>>,
 }
 
 impl<Storage> NostrMls<Storage>
