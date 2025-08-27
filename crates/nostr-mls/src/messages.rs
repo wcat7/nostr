@@ -381,7 +381,7 @@ where
                     message_bytes: None,
                 })
             }
-            ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+            ProcessedMessageContent::StagedCommitMessage(_) => {
                 // This is a commit message
                 tracing::info!(target: "nostr_mls::messages::process_message_for_group", "Received commit message");
                 // Return message bytes for later processing instead of merging immediately
@@ -423,22 +423,28 @@ where
     /// * `Err(Error)` - If commit processing fails
     pub fn process_commit_message_for_group(
         &self,
-        group: &mut MlsGroup,
+        mls_group_id: &GroupId,
         message_bytes: &[u8],
     ) -> Result<ProcessMessageResult, Error> {
         // This is a commit message
         tracing::info!(target: "nostr_mls::messages::process_commit_message_for_group", "Processing commit message");
+
+        // Load the MLS group directly by mls_group_id
+        let mut mls_group = self
+            .load_mls_group(mls_group_id)
+            .map_err(|e| Error::Group(e.to_string()))?
+            .ok_or(Error::GroupNotFound)?;
 
         // Deserialize and process the message
         let mls_message = MlsMessageIn::tls_deserialize_exact(message_bytes)?;
         let protocol_message = mls_message.try_into_protocol_message()?;
 
         // Return error if group ID doesn't match
-        if protocol_message.group_id() != group.group_id() {
+        if protocol_message.group_id() != mls_group.group_id() {
             return Err(Error::ProtocolGroupIdMismatch);
         }
 
-        let processed_message = match group.process_message(&self.provider, protocol_message) {
+        let processed_message = match mls_group.process_message(&self.provider, protocol_message) {
             Ok(processed_message) => processed_message,
             Err(ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage)) => {
                 return Err(Error::CannotDecryptOwnMessage);
@@ -487,7 +493,7 @@ where
 
                     // Get information about the removed member through leaf index from group
                     // IMPORTANT: We need to get this information BEFORE the group state is updated
-                    if let Some(member) = group.member_at(removed_index) {
+                    if let Some(member) = mls_group.member_at(removed_index) {
                         if let Ok(credential) = BasicCredential::try_from(member.credential.clone())
                         {
                             let identity_bytes = credential.identity();
@@ -540,7 +546,7 @@ where
         };
 
         // Try to merge the staged commit
-        if let Err(merge_error) = group.merge_staged_commit(&self.provider, *staged_commit) {
+        if let Err(merge_error) = mls_group.merge_staged_commit(&self.provider, *staged_commit) {
             tracing::warn!(target: "nostr_mls::messages::process_commit_message_for_group", "Failed to merge staged commit: {:?}", merge_error);
             // If merge fails but we have member changes, return them anyway
             // This handles the case where a member is processing their own removal
@@ -558,7 +564,7 @@ where
         }
 
         // Try to merge pending commit
-        if let Err(pending_error) = group.merge_pending_commit(&self.provider) {
+        if let Err(pending_error) = mls_group.merge_pending_commit(&self.provider) {
             tracing::warn!(target: "nostr_mls::messages::process_commit_message_for_group", "Failed to merge pending commit: {:?}", pending_error);
             // If merge fails but we have member changes, return them anyway
             if member_changes.is_some() {
@@ -575,12 +581,12 @@ where
         }
 
         // Persist updated group data (e.g., rotated nostr_group_id, new epoch)
-        if let Some(mut stored) = self.get_group(group.group_id())? {
+        if let Some(mut stored) = self.get_group(mls_group.group_id())? {
             // Try to extract latest NostrGroupDataExtension to grab rotated id
-            if let Ok(ext) = crate::extension::NostrGroupDataExtension::from_group(&group) {
+            if let Ok(ext) = crate::extension::NostrGroupDataExtension::from_group(&mls_group) {
                 stored.nostr_group_id = ext.nostr_group_id;
             }
-            stored.epoch = group.epoch().as_u64();
+            stored.epoch = mls_group.epoch().as_u64();
             self.storage()
                 .save_group(stored)
                 .map_err(|e| Error::Group(e.to_string()))?;
