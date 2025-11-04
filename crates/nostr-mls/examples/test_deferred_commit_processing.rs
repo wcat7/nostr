@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
 
     // === Bob publishes his KeyPackage ===
     let (bob_key_package_encoded, tags) = bob_nostr_mls
-        .create_key_package_for_event(&bob_keys.public_key(), [relay_url.clone()], "test-client")?;
+        .create_key_package_for_event(&bob_keys.public_key(), [relay_url.clone()], Some("test-client"))?;
 
     let bob_key_package_event = EventBuilder::new(Kind::MlsKeyPackage, bob_key_package_encoded)
         .tags(tags)

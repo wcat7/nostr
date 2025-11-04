@@ -50,14 +50,14 @@ async fn main() -> Result<()> {
     let relay = RelayUrl::parse("ws://localhost:8080").unwrap();
 
     // Generate key packages for Bob and Charlie
-    let (bob_kp_enc, bob_tags) = bob_mls.create_key_package_for_event(&bob_keys.public_key(), [relay.clone()], "test-client")?;
+    let (bob_kp_enc, bob_tags) = bob_mls.create_key_package_for_event(&bob_keys.public_key(), [relay.clone()], Some("test-client"))?;
     let bob_unsigned = EventBuilder::new(Kind::MlsKeyPackage, bob_kp_enc)
         .tags(bob_tags)
         .build(bob_keys.public_key());
     let bob_kp_event = bob_unsigned.sign(&bob_keys).await?;
     let bob_kp: KeyPackage = alice_mls.parse_key_package(&bob_kp_event)?;
 
-    let (charlie_kp_enc, charlie_tags) = charlie_mls.create_key_package_for_event(&charlie_keys.public_key(), [relay.clone()], "test-client")?;
+    let (charlie_kp_enc, charlie_tags) = charlie_mls.create_key_package_for_event(&charlie_keys.public_key(), [relay.clone()], Some("test-client"))?;
     let charlie_unsigned = EventBuilder::new(Kind::MlsKeyPackage, charlie_kp_enc)
         .tags(charlie_tags)
         .build(charlie_keys.public_key());

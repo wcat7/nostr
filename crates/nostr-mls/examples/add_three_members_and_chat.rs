@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === Bob publishes KeyPackage ===
     let relay = RelayUrl::parse("ws://localhost:8080").unwrap();
-    let (bob_kp_enc, bob_tags) = bob_mls.create_key_package_for_event(&bob_keys.public_key(), [relay.clone()])?;
+    let (bob_kp_enc, bob_tags) = bob_mls.create_key_package_for_event(&bob_keys.public_key(), [relay.clone()], None)?;
     let bob_kp_unsigned = EventBuilder::new(Kind::MlsKeyPackage, bob_kp_enc)
         .tags(bob_tags)
         .build(bob_keys.public_key());
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // === Charlie publishes KeyPackage ===
-    let (charlie_kp_enc, charlie_tags) = charlie_mls.create_key_package_for_event(&charlie_keys.public_key(), [relay.clone()])?;
+    let (charlie_kp_enc, charlie_tags) = charlie_mls.create_key_package_for_event(&charlie_keys.public_key(), [relay.clone()], None)?;
     let charlie_kp_unsigned = EventBuilder::new(Kind::MlsKeyPackage, charlie_kp_enc)
         .tags(charlie_tags)
         .build(charlie_keys.public_key());

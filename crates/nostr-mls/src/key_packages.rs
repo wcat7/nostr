@@ -25,13 +25,13 @@ where
     ///
     /// * `public_key` - The user's nostr public key
     /// * `relays` - An iterator of relay URLs where the key package should be published
-    /// * `client` - The client name to include in the event tags
+    /// * `client` - Optional client name to include in the event tags
     ///
     /// # Returns
     ///
     /// A tuple containing:
     /// * A hex-encoded string containing the serialized key package
-    /// * A tuple of tags for the Nostr event
+    /// * A vector of tags for the Nostr event (4 tags if client is None, 5 tags if client is Some)
     ///
     /// # Errors
     ///
@@ -43,8 +43,8 @@ where
         &self,
         public_key: &PublicKey,
         relays: I,
-        client: &str,
-    ) -> Result<(String, [Tag; 5]), Error>
+        client: Option<&str>,
+    ) -> Result<(String, Vec<Tag>), Error>
     where
         I: IntoIterator<Item = RelayUrl>,
     {
@@ -64,16 +64,19 @@ where
 
         let key_package_serialized = key_package_bundle.key_package().tls_serialize_detached()?;
 
-        let tags = [
+        let mut tags = vec![
             Tag::custom(TagKind::MlsProtocolVersion, ["1.0"]),
             Tag::custom(
                 TagKind::MlsCiphersuite,
-                [self.ciphersuite_value().to_string()],
+                [self.ciphersuite_value()],
             ),
-            Tag::custom(TagKind::MlsExtensions, [self.extensions_value()]),
+            Tag::custom(TagKind::MlsExtensions, self.extensions_value()),
             Tag::relays(relays),
-            Tag::custom(TagKind::Client, [client]),
         ];
+
+        if let Some(client) = client {
+            tags.push(Tag::custom(TagKind::Client, [client]));
+        }
 
         Ok((hex::encode(key_package_serialized), tags))
     }
@@ -190,10 +193,10 @@ where
         &self,
         public_key: &PublicKey,
     ) -> Result<(CredentialWithKey, SignatureKeyPair), Error> {
-        // Encode to hex
-        let public_key: String = public_key.to_hex();
+        // Use raw bytes format (32 bytes) instead of hex string (64 bytes)
+        let public_key_bytes: Vec<u8> = public_key.to_bytes().to_vec();
 
-        let credential = BasicCredential::new(public_key.into());
+        let credential = BasicCredential::new(public_key_bytes);
         let signature_keypair = SignatureKeyPair::new(self.ciphersuite.signature_algorithm())?;
 
         signature_keypair
@@ -207,6 +210,50 @@ where
             },
             signature_keypair,
         ))
+    }
+
+    /// Parses a public key from credential identity bytes with backwards compatibility.
+    ///
+    /// This function supports both the incorrect 64-byte UTF-8 encoded hex string format
+    /// and the correct 32-byte raw format as specified in MIP-00.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_bytes` - The raw bytes from a BasicCredential's identity field
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(PublicKey)` - The parsed public key
+    /// * `Err(Error)` - If the identity bytes cannot be parsed in either format
+    ///
+    /// # Format Support
+    ///
+    /// - **32 bytes**: New format (raw public key bytes) - preferred
+    /// - **64 bytes**: Legacy format (UTF-8 encoded hex string) - deprecated but supported
+    pub(crate) fn parse_credential_identity(
+        &self,
+        identity_bytes: &[u8],
+    ) -> Result<PublicKey, Error> {
+        match identity_bytes.len() {
+            32 => {
+                // Correct format: raw 32 bytes
+                PublicKey::from_slice(identity_bytes)
+                    .map_err(|e| Error::KeyPackage(format!("Invalid 32-byte public key: {}", e)))
+            }
+            64 => {
+                // Incorrect format: 64-byte UTF-8 encoded hex string
+                let hex_str = std::str::from_utf8(identity_bytes).map_err(|e| {
+                    Error::KeyPackage(format!("Invalid UTF-8 in legacy credential: {}", e))
+                })?;
+                PublicKey::from_hex(hex_str).map_err(|e| {
+                    Error::KeyPackage(format!("Invalid hex in legacy credential: {}", e))
+                })
+            }
+            _ => Err(Error::KeyPackage(format!(
+                "Invalid credential identity length: {} (expected 32 or 64)",
+                identity_bytes.len()
+            ))),
+        }
     }
 }
 
@@ -224,9 +271,9 @@ mod tests {
                 .unwrap();
         let relays = vec![RelayUrl::parse("wss://relay.example.com").unwrap()];
 
-        // Create key package
+        // Create key package without client
         let (key_package_hex, tags) = nostr_mls
-            .create_key_package_for_event(&test_pubkey, relays.clone(), "test-client")
+            .create_key_package_for_event(&test_pubkey, relays.clone(), None)
             .expect("Failed to create key package");
 
         // Create new instance for parsing
@@ -240,12 +287,11 @@ mod tests {
         // Verify the key package has the expected properties
         assert_eq!(key_package.ciphersuite(), DEFAULT_CIPHERSUITE);
 
-        assert_eq!(tags.len(), 5);
+        assert_eq!(tags.len(), 4);
         assert_eq!(tags[0].kind(), TagKind::MlsProtocolVersion);
         assert_eq!(tags[1].kind(), TagKind::MlsCiphersuite);
         assert_eq!(tags[2].kind(), TagKind::MlsExtensions);
         assert_eq!(tags[3].kind(), TagKind::Relays);
-        assert_eq!(tags[4].kind(), TagKind::Client);
 
         assert_eq!(
             tags[3].content().unwrap(),
@@ -268,7 +314,7 @@ mod tests {
 
         // Create and parse key package
         let (key_package_hex, _) = nostr_mls
-            .create_key_package_for_event(&test_pubkey, relays.clone(), "test-client")
+            .create_key_package_for_event(&test_pubkey, relays.clone(), None)
             .expect("Failed to create key package");
 
         // Create new instance for parsing and deletion
@@ -318,7 +364,7 @@ mod tests {
 
         // Create and parse key package
         let (key_package_hex, _) = nostr_mls
-            .create_key_package_for_event(&test_pubkey, relays.clone(), "test-client")
+            .create_key_package_for_event(&test_pubkey, relays.clone(), None)
             .expect("Failed to create key package");
 
         let key_package = nostr_mls
@@ -334,5 +380,36 @@ mod tests {
         // The result might be None if the key package wasn't stored in this test setup
         // This test mainly verifies that the method doesn't panic and returns a valid result
         assert!(result.is_none() || result.is_some());
+    }
+
+    #[test]
+    fn test_key_package_with_optional_client() {
+        let nostr_mls = create_test_nostr_mls();
+        let test_pubkey =
+            PublicKey::from_hex("884704bd421671e01c13f854d2ce23ce2a5bfe9562f4f297ad2bc921ba30c3a6")
+                .unwrap();
+        let relays = vec![RelayUrl::parse("wss://relay.example.com").unwrap()];
+
+        // Test without client (should have 4 tags)
+        let (_, tags_without_client) = nostr_mls
+            .create_key_package_for_event(&test_pubkey, relays.clone(), None)
+            .expect("Failed to create key package");
+        assert_eq!(tags_without_client.len(), 4);
+        assert_eq!(tags_without_client[0].kind(), TagKind::MlsProtocolVersion);
+        assert_eq!(tags_without_client[1].kind(), TagKind::MlsCiphersuite);
+        assert_eq!(tags_without_client[2].kind(), TagKind::MlsExtensions);
+        assert_eq!(tags_without_client[3].kind(), TagKind::Relays);
+
+        // Test with client (should have 5 tags)
+        let (_, tags_with_client) = nostr_mls
+            .create_key_package_for_event(&test_pubkey, relays.clone(), Some("test-client"))
+            .expect("Failed to create key package");
+        assert_eq!(tags_with_client.len(), 5);
+        assert_eq!(tags_with_client[0].kind(), TagKind::MlsProtocolVersion);
+        assert_eq!(tags_with_client[1].kind(), TagKind::MlsCiphersuite);
+        assert_eq!(tags_with_client[2].kind(), TagKind::MlsExtensions);
+        assert_eq!(tags_with_client[3].kind(), TagKind::Relays);
+        assert_eq!(tags_with_client[4].kind(), TagKind::Client);
+        assert_eq!(tags_with_client[4].content().unwrap(), "test-client");
     }
 }

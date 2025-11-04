@@ -35,9 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === Step 1: Alice creates 3 keypackages ===
     tracing::info!("Step 1: Alice creates 3 keypackages");
     
-    let (alice_kp1_enc, _alice_kp1_tags) = alice_mls.create_key_package_for_event(&alice_keys.public_key(), [relay.clone()], "test-client")?;
-    let (alice_kp2_enc, alice_kp2_tags) = alice_mls.create_key_package_for_event(&alice_keys.public_key(), [relay.clone()], "test-client")?;
-    let (alice_kp3_enc, _alice_kp3_tags) = alice_mls.create_key_package_for_event(&alice_keys.public_key(), [relay.clone()], "test-client")?;
+    let (alice_kp1_enc, _alice_kp1_tags) = alice_mls.create_key_package_for_event(&alice_keys.public_key(), [relay.clone()], Some("test-client"))?;
+    let (alice_kp2_enc, alice_kp2_tags) = alice_mls.create_key_package_for_event(&alice_keys.public_key(), [relay.clone()], Some("test-client"))?;
+    let (alice_kp3_enc, _alice_kp3_tags) = alice_mls.create_key_package_for_event(&alice_keys.public_key(), [relay.clone()], Some("test-client"))?;
     
     tracing::info!("✅ Alice created 3 keypackages");
     tracing::info!("  KeyPackage 1: {}", &alice_kp1_enc[..32.min(alice_kp1_enc.len())]);

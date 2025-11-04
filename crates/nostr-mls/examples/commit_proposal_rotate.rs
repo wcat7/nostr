@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     // === Bob publishes KeyPackage ===
     let relay = RelayUrl::parse("ws://localhost:8080").unwrap();
 
-    let (bob_kp_enc, bob_tags) = bob_mls.create_key_package_for_event(&bob_keys.public_key(), [relay.clone()])?;
+    let (bob_kp_enc, bob_tags) = bob_mls.create_key_package_for_event(&bob_keys.public_key(), [relay.clone()], None)?;
     let bob_kp_unsigned = EventBuilder::new(Kind::MlsKeyPackage, bob_kp_enc)
         .tags(bob_tags)
         .build(bob_keys.public_key());
