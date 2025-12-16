@@ -202,9 +202,15 @@ where
         let ephemeral_nostr_keys: Keys = Keys::generate();
 
         let tag: Tag = Tag::custom(TagKind::h(), [hex::encode(group.nostr_group_id)]);
-        let event = EventBuilder::new(Kind::MlsGroupMessage, encrypted_content)
-            .tag(tag)
-            .sign_with_keys(&ephemeral_nostr_keys)?;
+        let mut event_builder = EventBuilder::new(Kind::MlsGroupMessage, encrypted_content)
+            .tag(tag);
+
+        // Check if rumor contains expiration tag and add it to the event
+        if let Some(expiration_tag) = rumor.tags.iter().find(|tag| tag.kind() == TagKind::Expiration) {
+            event_builder = event_builder.tag(expiration_tag.clone());
+        }
+
+        let event = event_builder.sign_with_keys(&ephemeral_nostr_keys)?;
 
         Ok(event)
     }
