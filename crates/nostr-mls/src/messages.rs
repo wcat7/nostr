@@ -159,16 +159,21 @@ where
     ///
     /// * `mls_group_id` - The MLS group ID
     /// * `rumor` - The unsigned Nostr event to encrypt and send
+    /// * `additional_tags` - Optional additional tags to add to the event (e.g., expiration tag)
     ///
     /// # Returns
     ///
     /// * `Ok(Event)` - The signed Nostr event ready for relay publication
     /// * `Err(Error)` - If message creation or encryption fails
-    pub fn create_message(
+    pub fn create_message<I>(
         &self,
         mls_group_id: &GroupId,
         mut rumor: UnsignedEvent,
-    ) -> Result<Event, Error> {
+        additional_tags: Option<I>,
+    ) -> Result<Event, Error>
+    where
+        I: IntoIterator<Item = Tag>,
+    {
         // Load mls group
         let mut mls_group = self
             .load_mls_group(mls_group_id)?
@@ -205,9 +210,11 @@ where
         let mut event_builder = EventBuilder::new(Kind::MlsGroupMessage, encrypted_content)
             .tag(tag);
 
-        // Check if rumor contains expiration tag and add it to the event
-        if let Some(expiration_tag) = rumor.tags.iter().find(|tag| tag.kind() == TagKind::Expiration) {
-            event_builder = event_builder.tag(expiration_tag.clone());
+        // Add additional tags if provided
+        if let Some(tags) = additional_tags {
+            for additional_tag in tags {
+                event_builder = event_builder.tag(additional_tag);
+            }
         }
 
         let event = event_builder.sign_with_keys(&ephemeral_nostr_keys)?;
