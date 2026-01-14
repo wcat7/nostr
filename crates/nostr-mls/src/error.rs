@@ -61,6 +61,8 @@ pub enum Error {
     ProtocolMessage(String),
     /// Key package error
     KeyPackage(String),
+    /// Key package verify error
+    KeyPackageVerify(KeyPackageVerifyError),
     /// Group error
     Group(String),
     /// Group exporter secret not found
@@ -127,6 +129,7 @@ impl fmt::Display for Error {
             Self::ProcessMessage(e) => write!(f, "{e}"),
             Self::ProtocolMessage(e) => write!(f, "{e}"),
             Self::KeyPackage(e) => write!(f, "{e}"),
+            Self::KeyPackageVerify(e) => write!(f, "{e}"),
             Self::Group(e) => write!(f, "{e}"),
             Self::GroupExporterSecretNotFound => write!(f, "group exporter secret not found"),
             Self::Message(e) => write!(f, "{e}"),
@@ -277,7 +280,7 @@ impl From<KeyPackageNewError> for Error {
 
 impl From<KeyPackageVerifyError> for Error {
     fn from(e: KeyPackageVerifyError) -> Self {
-        Self::KeyPackage(e.to_string())
+        Self::KeyPackageVerify(e)
     }
 }
 

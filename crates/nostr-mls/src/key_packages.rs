@@ -97,14 +97,16 @@ where
     /// * The hex decoding fails
     /// * The TLS deserialization fails
     /// * The key package validation fails (invalid signature, ciphersuite, or extensions)
+    /// * The key package lifetime is invalid or expired (returns `Error::KeyPackageVerify(KeyPackageVerifyError::InvalidLifetime)`)
     pub fn parse_serialized_key_package(&self, key_package_hex: &str) -> Result<KeyPackage, Error> {
         let key_package_bytes = hex::decode(key_package_hex)?;
 
         let key_package_in = KeyPackageIn::tls_deserialize(&mut key_package_bytes.as_slice())?;
 
         // Validate the signature, ciphersuite, and extensions of the key package
-        let key_package =
-            key_package_in.validate(self.provider.crypto(), ProtocolVersion::Mls10)?;
+        // Return KeyPackageVerifyError directly to upper layers for detailed error handling
+        let key_package = key_package_in
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)?;
 
         Ok(key_package)
     }
