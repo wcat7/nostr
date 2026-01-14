@@ -33,6 +33,12 @@ pub enum Command {
         /// Port
         #[clap(long)]
         port: Option<u16>,
+        /// Max active REQ subscriptions
+        #[clap(long)]
+        max_reqs: Option<usize>,
+        /// Max events per minute
+        #[clap(long)]
+        notes_per_minute: Option<u32>,
     },
     /// Serve Nostr Connect signer
     ///
